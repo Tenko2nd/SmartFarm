@@ -67,6 +67,7 @@ ROBOT_IDLE_HOURS = 2  # Robot probes every 2 hours
 
 #TODO: From moisture measure ration NPK asume concentration then predict output of sensor
 
+CSV_FILE = r"WeatherJanv2026/Final/WeatherJanv2026.csv"
 
 # ==========================================
 # 2. BIOLOGICAL & ENVIRONMENTAL FUNCTIONS
@@ -106,9 +107,27 @@ def estimer_rayonnement_solaire(latitude, jour_annee, t_max, t_min):
 
     return rs
 
-def get_temperature_jour(jour_annee):
-    #TODO: get the max and min of the temperature of the day.
-    return 0, 0
+# TODO: Use it only once a day for performance
+def get_day_temp_extremes(target_date):
+    """
+    target_date should be a string in 'YYYY-MM-DD' format
+    """
+    # Load the data
+    df = pd.read_csv(CSV_FILE)
+
+    # Convert 'time' column to datetime objects
+    df['time'] = pd.to_datetime(df['time'])
+
+    # Filter for the specific day
+    day_data = df[df['time'].dt.strftime('%Y-%m-%d') == target_date]
+
+    if day_data.empty:
+        return None, None
+
+    max_temp = day_data['temp'].max()
+    min_temp = day_data['temp'].min()
+
+    return max_temp, min_temp
 
 def calculate_fao56_et0(temp_c, relative_humidity, wind_speed=2.0, solar_rad=None, jour_annee=0):
     """
@@ -148,7 +167,7 @@ def calculate_fao56_et0(temp_c, relative_humidity, wind_speed=2.0, solar_rad=Non
     # If not provided, we use a simplified estimation for a sunny day
     # typical of the "monsoon climate" described on Page 2 of the PDF.
     if solar_rad is None:
-        tmax, tmin = get_temperature_jour(jour_annee)
+        tmax, tmin = get_day_temp_extremes(jour_annee)
         rn = estimer_rayonnement_solaire(LATITUDE_BANGKOK_RADIAN, jour_annee, tmax, tmin)
     else:
         rn = solar_rad
@@ -165,10 +184,10 @@ def calculate_fao56_et0(temp_c, relative_humidity, wind_speed=2.0, solar_rad=Non
 
 def calculate_sunlight(hour):
     """Simulates PPFD (umol/m2/s) based on a 24h cycle."""
-    # Peak light at 13:00 (1:00 PM), zero light before 6am and after 7pm
-    if 6 <= hour <= 19:
+    # Bangkok january estimation
+    if 6.5 <= hour <= 18:
         # Sine curve for natural light progression
-        intensity = 500 * np.sin(np.pi * (hour - 6) / 13)
+        intensity = 950 * np.sin(np.pi * (hour - 6.5) / 11.5)
         return round(max(0, intensity), 2)
     return 0.0
 
@@ -176,14 +195,8 @@ def add_realistic_noise(value, noise_level=0.01):
     """Adds Gaussian noise to sensor readings."""
     return max(0,value + np.random.normal(0, noise_level))
 
-def calculate_room_co2_drawdown(
-        plant_size_m2,
-        light_intensity_ppf,
-        current_co2_ppm,
-        interval_minutes,
-        temp_c,
-        room_pressure_hpa
-):
+def calculate_room_co2_drawdown(plant_size_m2, light_intensity_ppf, current_co2_ppm, interval_minutes, temp_c,
+        room_pressure_hpa):
     """
     Calculates the remaining CO2 in a room after plant absorption.
     Based on NASA TM 102788 (Wheeler & Sager) : 'Carbon Dioxide And Water Exchange Rates By A Wheat Crop In NASA'S
@@ -242,7 +255,6 @@ def calculate_room_co2_drawdown(
     final_co2_ppm = current_co2_ppm - delta_ppm
 
     return round(final_co2_ppm, 2)
-
 
 
 # ==========================================
@@ -320,7 +332,7 @@ def create_smart_farm_db(input_csv_path):
 # ==========================================
 
 # Run Engine
-smart_farm_data = create_smart_farm_db('WeatherJanv2026/Final/WeatherJanv2026.csv')
+smart_farm_data = create_smart_farm_db(CSV_FILE)
 
 # Display result
 print(smart_farm_data.head(15))

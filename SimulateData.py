@@ -4,6 +4,12 @@ import math
 
 #TODO: At the end if this script is robust, use it to train the model in reinforcment learning.
 
+# Maybe use other growth stages? https://en.wikipedia.org/wiki/Cereal_growth_staging_scales
+
+# Useful links:
+#   -> farming article library: https://open.alberta.ca/interact/ropin-the-web
+#   -> summary quick summary (seem reliable): https://icl-growingsolutions.com/agriculture/crops/wheat/
+
 # ==========================================
 # 1. PARAMETERS & CONFIGURATION
 # ==========================================
@@ -15,21 +21,19 @@ plants_values = {"PLANT_01" : {"COORDINATES":[0,1], "N":200, "P":75, "K":200, "p
 # ----- NPK -----
 # Based on the supply at BU-CROCCS
 NPK_POWDER_RATIO = [[21,21,21], [28,6,5], [6,32,25], [15,10,35]]
+# Fertilizer Requirements of Irrigated Grain and Oilseed Crops, alberta
+# Minimal NPK concentration (ppm) for soil. If below, add to get at least those values + margin
+NPK_SOIL_RATIO = {25, 45, 125}
+# Maybe not usefull ↓
 # Accumulation of Nutrients (NPK) at Different Growth Stages of Machine Transplanted Rice (Oryza sativa L.) Under Different Levels of Nitrogen and Split Schedules
 # T-AT = transplantation to active tillering, PI = Pinnacle Initiation, F = Flowering, M = Maturation
 NPK_UPTAKE_RATIO = {"T-AT": [20.9,20.6,19.4], "AT-PI": [33.7,43.4,36.5], "PI-F": [39.1,26.7,31.1], "F-M": [6.3,9.6,13]}
 # Estimation of NPK requirements for rice production in diverse Chinese environments under optimal fertilization rates
 # In this study, the estimated N, P, and K required to produce 1 Mg of rice grain were 21.0, 4.4, and 22.1kg in southern China
 NPK_REQUIRED_RATIO = [21,4.4,22.1]
-# to get the required in the soil for each stage
-NPK_SOIL_RATIO = {
-    key: [(val / 100) * NPK_REQUIRED_RATIO[i] for i, val in enumerate(values)]
-    for key, values in NPK_UPTAKE_RATIO.items()
-}
 
-#TODO: Based on PLant growth stage, refill with water put ratio
+#TODO: Based on PLant growth stage, refill with water put ratio NPK
 #TODO: PLant will consume NPK with proportion (if more N then more N consume)
-#TODO : RESEARCH → CO2 Absorption for wheat based on pixels
 
 # ----- CO2 -----
 # The optimal atmospheric CO2 concentration for the growth of winter wheat (Triticum aestivum). Journal of Plant Physiology, 184, 89-97. https://doi.org/10.1016/j.jplph.2015.07.003
@@ -37,11 +41,27 @@ TARGET_CO2_RANGE = {890,910} # Wheat CO2 for optimal growth (ppm)
 # CO2 flux in a wheat-soybean succession in subtropical Brazil: A carbon sink. Journal of Environmental Quality, 51, 899–915. https://doi.org/10.1002/jeq2.20362
 CO2_CONSUMPTION = 5.31 # Wheat CO2 Consumption (g CO₂ m⁻² day⁻¹)
 
-BASE_SOIL_MOISTURE = 45.0  # %
+# Let's assume 100,000 px = 1 m²
+PX_TO_SQRT_METER = 100_000
+PLANT_POT_SIZE_PX = round(0.12 * 0.15 * PX_TO_SQRT_METER) # 12*15 cm
+ROOM_VOLUME_LITERS = 0.4*0.6*0.4 + (0.4*0.6*0.15)/2
+
+# ----- Moisture & ET -----
+# Fertilizer Requirements of Irrigated Grain and Oilseed Crops, alberta
+SOIL_MOISTURE_RANGE = [60, 90] # The higher the VDP, the higher the soil moisture to avoid stress
+# The Plant-Transpiration Response to Vapor Pressure Deficit (VPD) in Durum Wheat Is Associated With Differential Yield Performance and Specific Expression of Genes Involved in Primary Metabolism and Water Transport. Frontiers in Plant Science, 9, 1994. https://doi.org/10.3389/fpls.2018.01994
+VDP_RANGE = [0.8, 1.2] # kPa
+
 LATITUDE_BANGKOK_RADIAN = 0.240
 
+# ----- Other -----
+# https://eos.com/blog/growing-wheat/#ref-anchor-1
+TEMPERATURE_RANGE = [21, 24] # °C
+# https://eos.com/crop-management-guide/wheat-growth-stages/
+SOIL_PH_RANGE = [6,7]
 
-# Timing Constants
+
+# ----- Timing Constants -----
 DATA_HEARTBEAT = '15min'  # 15 Minute intervals
 ROBOT_IDLE_HOURS = 2  # Robot probes every 2 hours
 
@@ -152,16 +172,77 @@ def calculate_sunlight(hour):
         return round(max(0, intensity), 2)
     return 0.0
 
-
 def add_realistic_noise(value, noise_level=0.01):
     """Adds Gaussian noise to sensor readings."""
     return max(0,value + np.random.normal(0, noise_level))
 
+def calculate_room_co2_drawdown(
+        plant_size_m2,
+        light_intensity_ppf,
+        current_co2_ppm,
+        interval_minutes,
+        temp_c,
+        room_pressure_hpa
+):
+    """
+    Calculates the remaining CO2 in a room after plant absorption.
+    Based on NASA TM 102788 (Wheeler & Sager) : 'Carbon Dioxide And Water Exchange Rates By A Wheat Crop In NASA'S
+    Biomass Production Chamber: Results From An 86-Day Study (January To April 1989)',
+    and Gruda et al. (2025) : 'Environmental conditions and nutritional quality of vegetables in protected cultivation'
 
-def simulate_co2(hour, light_intensity):
-    #TODO: use the plants to determine CO2 absorption and add refill when threshold crossed
-    """CO2 levels drop during peak light due to photosynthesis."""
-    return 1
+    Parameters:
+    plant_size_m2: Total vegetative area
+    light_intensity_ppf: Photosynthetic Photon Flux (umol/m2/s)
+    current_co2_ppm: Starting concentration
+    interval_minutes: Elapsed time
+    temp_c: Room temperature in Celsius
+    room_pressure_hpa: Room pressure in hPa
+    """
+
+    # 1. CONSTANTS & GAS PHYSICS
+    R = 0.08206  # Ideal Gas Constant (L*atm / K*mol)
+    temp_k = temp_c + 273.15
+    # Calculate Molar Volume of air at current temp (L/mol)
+    pressure_atm = room_pressure_hpa / 1013.25
+    molar_volume = R * temp_k / pressure_atm
+
+    # 2. CALCULATE NET UPTAKE RATE (umol/m2/s)
+    # Equation from NASA study (Fig 7): y = 0.054784x - 9.6297
+    # -9.6297 represents the respiration at 20°C.
+    base_respiration = 9.6297
+
+    # Adjust respiration for temperature (Article 2: 75% increase from 16C to 24C)
+    # This roughly equates to a 8% change per degree Celsius from a 20C baseline
+    # FIXME: Research as it annot be just a straight line
+    temp_factor = 1 + (temp_c - 20) * 0.08
+    adjusted_respiration = base_respiration * temp_factor
+
+    gross_photosynthesis = 0.054784 * light_intensity_ppf
+    net_uptake_rate = gross_photosynthesis - adjusted_respiration
+
+    # 3. ADJUST FOR CO2 CONCENTRATION LIMITATION
+    # Article 2 shows rate is stable from 800-2200ppm but drops below 800.
+    if current_co2_ppm < 800:
+        # Linear scaling factor: at 800ppm = 1.0, at 190ppm (compensation point) = 0.0
+        co2_factor = max(0, (current_co2_ppm - 190) / (800 - 190))
+        net_uptake_rate *= co2_factor
+    elif current_co2_ppm > 2200:
+        # Article 2 notes slight decrease/saturation above 2200
+        net_uptake_rate *= 0.9
+
+        # 4. CALCULATE TOTAL QUANTITY ABSORBED
+    total_seconds = interval_minutes * 60
+    total_umol_absorbed = net_uptake_rate * plant_size_m2 * total_seconds
+
+    # 5. CONVERT ABSORBED MICROMOLES TO PPM CHANGE IN ROOM
+    # ppm = (micromoles_of_gas / total_moles_of_air)
+    total_moles_air_in_room = ROOM_VOLUME_LITERS / molar_volume
+    delta_ppm = total_umol_absorbed / total_moles_air_in_room
+
+    final_co2_ppm = current_co2_ppm - delta_ppm
+
+    return round(final_co2_ppm, 2)
+
 
 
 # ==========================================
@@ -184,7 +265,7 @@ def create_smart_farm_db(input_csv_path):
         air_temp = add_realistic_noise(row['temp'], 0.1)
         humidity = add_realistic_noise(row['rhum'], 0.1)
         light = add_realistic_noise(calculate_sunlight(ts.hour),2)
-        co2 = add_realistic_noise(simulate_co2(ts.hour, light), 0.01)
+        co2 = add_realistic_noise(calculate_room_co2_drawdown(ts.hour, light), 0.01)
 
 
         # C. Broadcast ambient data to all 3 plants
@@ -216,7 +297,7 @@ def create_smart_farm_db(input_csv_path):
                 p_data["Green_Pixels"] = values["pixels"]
                 p_data["Size"] = values["size"]
                 p_data["Leaf_temp"] = p_data["Air_temp"] - 1.8
-                p_data["Soil_Moisture"] = add_realistic_noise(BASE_SOIL_MOISTURE, 0.05)
+                p_data["Soil_Moisture"] = add_realistic_noise(1, 0.05)
             else:
                 p_data["NPK"] = np.nan
                 p_data["RGB_Metrics"] = np.nan

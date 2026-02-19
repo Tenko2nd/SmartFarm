@@ -1,3 +1,5 @@
+import random
+from datetime import timedelta
 import pandas as pd
 import numpy as np
 import math
@@ -13,10 +15,19 @@ import math
 # ==========================================
 # 1. PARAMETERS & CONFIGURATION
 # ==========================================
-plants_values = {"PLANT_01" : {"COORDINATES":[0,1], "N":200, "P":75, "K":200, "pixels": 500, "size": 70},
-                 "PLANT_02": {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "pixels": 430, "size": 53},
-                 "PLANT_03": {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "pixels": 723, "size": 85},
-                 }
+# TODO: Create a plant object for facilitation of manipulation
+plants_values = {"PLANT_01":
+                     {"COORDINATES": [0, 1], "N": 200, "P": 75, "K": 200, "green_px": 500, "GLI": 0,
+                      "necrotic_spot": 0, "soil_moisture": 40},
+                 "PLANT_02":
+                     {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "green_px": 430, "GLI": 0,
+                      "necrotic_spot": 0, "soil_moisture": 40},
+                 "PLANT_03":
+                     {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "green_px": 723, "GLI": 0,
+                      "necrotic_spot": 0, "soil_moisture": 40}}
+
+# ----- GLI: Green Leaf Index -----
+GLI_THRESHOLD = {"Dead" : 0, "Critic" : 0.1, "Low" : 0.2, "Good" : 0.3}
 
 # ----- NPK -----
 # Based on the supply at BU-CROCCS
@@ -37,9 +48,10 @@ NPK_REQUIRED_RATIO = [21,4.4,22.1]
 
 # ----- CO2 -----
 # The optimal atmospheric CO2 concentration for the growth of winter wheat (Triticum aestivum). Journal of Plant Physiology, 184, 89-97. https://doi.org/10.1016/j.jplph.2015.07.003
-TARGET_CO2_RANGE = {890,910} # Wheat CO2 for optimal growth (ppm)
+TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm)
 # CO2 flux in a wheat-soybean succession in subtropical Brazil: A carbon sink. Journal of Environmental Quality, 51, 899–915. https://doi.org/10.1002/jeq2.20362
 CO2_CONSUMPTION = 5.31 # Wheat CO2 Consumption (g CO₂ m⁻² day⁻¹)
+BASE_CO2 = 900
 
 # Let's assume 100,000 px = 1 m²
 PX_TO_SQRT_METER = 100_000
@@ -48,21 +60,26 @@ ROOM_VOLUME_LITERS = 0.4*0.6*0.4 + (0.4*0.6*0.15)/2
 
 # ----- Moisture & ET -----
 # Fertilizer Requirements of Irrigated Grain and Oilseed Crops, alberta
-SOIL_MOISTURE_RANGE = [60, 90] # The higher the VDP, the higher the soil moisture to avoid stress
+SOIL_MOISTURE_RANGE = [60, 90] # The higher the vpd, the higher the soil moisture to avoid stress
+CRITIC_SOIL_MOISTURE_RANGE = [40, 100]
 # The Plant-Transpiration Response to Vapor Pressure Deficit (VPD) in Durum Wheat Is Associated With Differential Yield Performance and Specific Expression of Genes Involved in Primary Metabolism and Water Transport. Frontiers in Plant Science, 9, 1994. https://doi.org/10.3389/fpls.2018.01994
-VDP_RANGE = [0.8, 1.2] # kPa
+IDEAL_VPD_RANGE = [0.8, 1.2] # kPa
+# Future heatwave conditions inhibit CO2-induced stomatal closure in wheat. The New phytologist, 249(3), 1234–1252. https://doi.org/10.1111/nph.70722
+CRITICAL_VPD_RANGE = [0.5, 3.14] # kPa
 
 LATITUDE_BANGKOK_RADIAN = 0.240
 
 # ----- Other -----
 # https://eos.com/blog/growing-wheat/#ref-anchor-1
-TEMPERATURE_RANGE = [21, 24] # °C
+IDEAL_TEMPERATURE_RANGE = [21, 24] # °C
+CRITICAL_TEMPERATURE_RANGE = [4, 35] # °C
+
 # https://eos.com/crop-management-guide/wheat-growth-stages/
 SOIL_PH_RANGE = [6,7]
 
 
 # ----- Timing Constants -----
-DATA_HEARTBEAT = '15min'  # 15 Minute intervals
+DATA_HEARTBEAT = 15  # 15 Minute intervals
 ROBOT_IDLE_HOURS = 2  # Robot probes every 2 hours
 
 #TODO: From moisture measure ration NPK asume concentration then predict output of sensor
@@ -73,7 +90,7 @@ CSV_FILE = r"WeatherJanv2026/Final/WeatherJanv2026.csv"
 # 2. BIOLOGICAL & ENVIRONMENTAL FUNCTIONS
 # ==========================================
 
-def estimer_rayonnement_solaire(latitude, jour_annee, t_max, t_min):
+def estimate_solar_radiation(latitude, jour_annee, t_max, t_min):
     """
     Estime le rayonnement solaire (Rs) en MJ/m2/jour
     Méthode Hargreaves-Samani (recommandée par la FAO-56).
@@ -129,7 +146,25 @@ def get_day_temp_extremes(target_date):
 
     return max_temp, min_temp
 
-def calculate_fao56_et0(temp_c, relative_humidity, wind_speed=2.0, solar_rad=None, jour_annee=0):
+def calculate_vpd(temp_c, humidite_relative):
+    """
+    Calculate VPD (Vapor Pressure Deficit) in kPa.
+    """
+    # Saturation Vapor Pressure (es)
+    es = 0.6108 * math.exp((17.27 * temp_c) / (temp_c + 237.3))
+
+    # Actual Vapor Pressure (ea)
+    ea = es * (humidite_relative / 100.0)
+
+    # VPD
+    vpd = es - ea
+
+    # Slope of Vapor Pressure Curve (delta)
+    delta = (4098 * es) / math.pow((temp_c + 237.3), 2)
+
+    return vpd, delta
+
+def calculate_fao56_et0(temp_c, relative_humidity, wind_speed, jour_annee, solar_rad=None):
     """
     Calculates the Reference Evapotranspiration (ET0) based on the FAO-56
     Penman-Monteith method.
@@ -139,36 +174,23 @@ def calculate_fao56_et0(temp_c, relative_humidity, wind_speed=2.0, solar_rad=Non
     Args:
         temp_c (float): Air temperature in degrees Celsius.
         relative_humidity (float): Relative humidity as a percentage (0-100).
-        wind_speed (float): Wind speed at 2m height (m/s). Default is 2.0 (FAO standard).
+        wind_speed (float): Wind speed at 2m height (m/s).
         solar_rad (float): Net radiation (MJ/m2/day). If None, it estimates based on temp.
+        jour_annee (date): Date of the day, format 'YYYY-MM-DD'
 
     Returns:
         float: Estimated ET0 in mm/day.
     """
-
-    # 1. Saturation Vapor Pressure (es)
-    # Formula based on FAO-56 Annex
-    es = 0.6108 * math.exp((17.27 * temp_c) / (temp_c + 237.3))
-
-    # 2. Actual Vapor Pressure (ea)
-    ea = es * (relative_humidity / 100.0)
-
-    # 3. Vapor Pressure Deficit (VPD)
-    vpd = es - ea
-
-    # 4. Slope of Vapor Pressure Curve (delta)
-    delta = (4098 * es) / math.pow((temp_c + 237.3), 2)
+    vpd, delta = calculate_vpd(temp_c, relative_humidity)
 
     # 5. Psychrometric Constant (gamma)
     # Standard value at sea level (kPa/C)
     gamma = 0.067
 
     # 6. Net Radiation (Rn)
-    # If not provided, we use a simplified estimation for a sunny day
-    # typical of the "monsoon climate" described on Page 2 of the PDF.
     if solar_rad is None:
         tmax, tmin = get_day_temp_extremes(jour_annee)
-        rn = estimer_rayonnement_solaire(LATITUDE_BANGKOK_RADIAN, jour_annee, tmax, tmin)
+        rn = estimate_solar_radiation(LATITUDE_BANGKOK_RADIAN, jour_annee, tmax, tmin)
     else:
         rn = solar_rad
 
@@ -256,6 +278,108 @@ def calculate_room_co2_drawdown(plant_size_m2, light_intensity_ppf, current_co2_
 
     return round(final_co2_ppm, 2)
 
+def calculate_plant_size_farm_m2():
+    total_size = sum(plant.get("green_px", 0) for plant in plants_values.values()) / PX_TO_SQRT_METER
+    return total_size
+
+# TODO: Make critic index values have consequences later
+#  (eg. A plant has critic vpd, 5 hours later it appears visible problems if not fixed)
+def optimal_condition_index(plant_id, co2, light, temperature, humidity):
+    """
+    The pourcentage of optimal condition respected for the plant to grow perfectly.
+    100% the plant grow perfectly, 0% it's dying
+    :return: The optimal condition index in %
+    """
+    index_vpd = optimal_vpd(plant_id, temperature, humidity)
+    moisture = plants_values[plant_id]["soil_moisture"]
+    index_moisture = optimal_soil(moisture, temperature, humidity)
+
+    return 0
+
+
+def optimal_vpd(plant_id, temp_c, relative_humidity):
+    """
+    Calcule l'optimalité du climat pour le blé dur.
+    """
+
+    vpd, _ = calculate_vpd(temp_c, relative_humidity)
+
+    min_ideal, max_ideal = IDEAL_VPD_RANGE
+    min_crit, max_crit = CRITICAL_VPD_RANGE
+
+    # Critic limits
+    # TODO: yellow leaves
+    if vpd <= min_crit or vpd >= max_crit:
+        return 0.0
+
+    # Optimal state
+    if min_ideal <= vpd <= max_ideal:
+        return 100.0
+
+    # Interpolation
+    if vpd < min_ideal:
+        t = (vpd - min_crit) / (min_ideal - min_crit)
+    else:
+        t = (max_crit - vpd) / (max_crit - max_ideal)
+
+    # Quadratic smoothing
+    score = (3 * t ** 2 - 2 * t ** 3)
+    return round(score * 100, 2)
+
+
+def optimal_soil(current_moisture, temperature, humidity):
+    """
+    Calculates soil moisture optimality (0-100%) dynamically based on VPD.
+
+    Args:
+        current_moisture (float): Actual soil moisture percentage (0-100).
+        temperature (float): Actual temperature (Celsius).
+        humidity (int): Actual humidity (0-100%).
+    """
+    vpd, _ = calculate_vpd(temperature, humidity)
+    vpd_low, vpd_high = CRITICAL_VPD_RANGE
+    moisture_low, moisture_high = SOIL_MOISTURE_RANGE  # Minimum and Maximum ideal targets
+    min_crit, max_crit = CRITIC_SOIL_MOISTURE_RANGE
+
+    # 2. CALCULATE DYNAMIC TARGET
+    # We map the VPD to the Moisture target range
+    # If VPD is low (0.5), target is 60%. If VPD is high (3.14), target is 90%.
+    clamped_vpd = max(vpd_low, min(vpd_high, vpd))
+    vpd_ratio = (clamped_vpd - vpd_low) / (vpd_high - vpd_low)
+
+    # This is the "Perfect" moisture point for the current weather
+    dynamic_target = moisture_low + (vpd_ratio * (moisture_high - moisture_low))
+
+    # 3. SCORING LOGIC
+    # Case A: Below Critical Minimum (Death zone)
+    # TODO: yellow leaves
+    if current_moisture <= min_crit:
+        return 0.0
+
+    # Case B: Within a small buffer around the dynamic target (Perfect zone)
+    # We allow a +/- 5% tolerance for 100% score
+    if (dynamic_target - 5) <= current_moisture <= (dynamic_target + 5):
+        return 100.0
+
+    # Case C: Between Critical Min and Target (Drought Stress)
+    if current_moisture < dynamic_target:
+        t = (current_moisture - min_crit) / ((dynamic_target - 5) - min_crit)
+        score = (3 * t ** 2 - 2 * t ** 3)  # Smoothstep
+        return round(score * 100, 2)
+
+    # Case D: Above Target (Saturation / Over-watering)
+    # Higher is better than lower: the score only drops to 60% health at saturation
+    if current_moisture > dynamic_target:
+        # Distance from target to 100% moisture
+        t = (max_crit - current_moisture) / (max_crit - (dynamic_target + 5))
+        smooth = (3 * t ** 2 - 2 * t ** 3)
+        # We remap the score so it goes from 100% down to 50% (instead of 0%)
+        score = 0.5 + (0.5 * smooth)
+        return round(score * 100, 2)
+
+    return 0.0
+
+
 
 # ==========================================
 # 3. DATA PROCESSING ENGINE
@@ -268,27 +392,30 @@ def create_smart_farm_db(input_csv_path):
     df_weather = df_weather.set_index('time')
 
     # Upsample from 1 hour to 15 minutes
-    df_resampled = df_weather.resample(DATA_HEARTBEAT).interpolate(method='linear')
+    df_resampled = df_weather.resample(f'{DATA_HEARTBEAT}min').interpolate(method='cubicspline')
 
     final_rows = []
+
+    co2_in_farm = BASE_CO2
 
     # B. Generate data for each timestamp
     for ts, row in df_resampled.iterrows():
         air_temp = add_realistic_noise(row['temp'], 0.1)
         humidity = add_realistic_noise(row['rhum'], 0.1)
+        pressure = add_realistic_noise(row['pres'], 0.1)
         light = add_realistic_noise(calculate_sunlight(ts.hour),2)
-        co2 = add_realistic_noise(calculate_room_co2_drawdown(ts.hour, light), 0.01)
-
+        co2 = add_realistic_noise(co2_in_farm, 1)
 
         # C. Broadcast ambient data to all 3 plants
-        for p_id, values in plants_values.items():
-            # Check if robot is probing (Every 2 hours on the dot)
-            is_probed = 1 if (ts.hour % ROBOT_IDLE_HOURS == 0 and ts.minute == 0) else 0
 
-            # Simulate Plant Metrics
-            # NPK slightly drifts/decreases unless fertilized
-            # RGB Metrics: [nb_green_pixels, size_index]
-            # Leaf temp usually Air Temp - 1.5C (if transpiring well)
+        # Check if robot is probing (Every 2 hours on the dot)
+        is_probed = 1 if (ts.hour % ROBOT_IDLE_HOURS == 0 and ts.minute == 0) else 0
+
+        for i, (p_id, values) in enumerate(plants_values.items()):
+
+            # Add slight delta for robot time to take measure
+            # maybe model will be better with timestamp of initial command (so ambiant values changes a bit?)
+            ts += timedelta(seconds=random.randint(30,45))
 
             p_data = {
                 "TimeStamp": ts,
@@ -306,10 +433,10 @@ def create_smart_farm_db(input_csv_path):
                 p_data["N"] = values["N"]
                 p_data["P"] = values["P"]
                 p_data["K"] = values["K"]
-                p_data["Green_Pixels"] = values["pixels"]
+                p_data["green_px"] = values["green_px"]
                 p_data["Size"] = values["size"]
                 p_data["Leaf_temp"] = p_data["Air_temp"] - 1.8
-                p_data["Soil_Moisture"] = add_realistic_noise(1, 0.05)
+                p_data["Soil_Moisture"] = values["soil_moisture"]
             else:
                 p_data["NPK"] = np.nan
                 p_data["RGB_Metrics"] = np.nan
@@ -317,6 +444,15 @@ def create_smart_farm_db(input_csv_path):
                 p_data["Soil_Moisture"] = np.nan
 
             final_rows.append(p_data)
+
+        co2_in_farm = calculate_room_co2_drawdown(
+                plant_size_m2=calculate_plant_size_farm_m2(),
+                light_intensity_ppf=light,
+                current_co2_ppm=co2_in_farm,
+                interval_minutes=DATA_HEARTBEAT,
+                temp_c=air_temp,
+                room_pressure_hpa=pressure,
+            )
 
     # D. Final Assembly and Forward Fill
     master_df = pd.DataFrame(final_rows)

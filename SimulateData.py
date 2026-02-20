@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import math
 
-#TODO: At the end if this script is robust, use it to train the model in reinforcment learning.
+#TODO: At the end if this script is robust, use it to train the model in reinforcement learning.
 
 # Maybe use other growth stages? https://en.wikipedia.org/wiki/Cereal_growth_staging_scales
 
@@ -33,25 +33,33 @@ GLI_THRESHOLD = {"Dead" : 0, "Critic" : 0.1, "Low" : 0.2, "Good" : 0.3}
 # Based on the supply at BU-CROCCS
 NPK_POWDER_RATIO = [[21,21,21], [28,6,5], [6,32,25], [15,10,35]]
 # Fertilizer Requirements of Irrigated Grain and Oilseed Crops, alberta
-# Minimal NPK concentration (ppm) for soil. If below, add to get at least those values + margin
-NPK_SOIL_RATIO = {25, 45, 125}
-# Maybe not usefull ↓
+# Minimal NPK concentration (1 ppm = 2 lb/ac) for soil. If below, add to get at least those values + margin
+NPK_SOIL_RATIO_RANGE = {"N": [75,100],"P": [35, 50],"K": [125, 150]} # ppm
+DEFICIENT_NPK_SOIL_RATIO = {"N": 20,"P": 10,"K": 25} # ppm
 # Accumulation of Nutrients (NPK) at Different Growth Stages of Machine Transplanted Rice (Oryza sativa L.) Under Different Levels of Nitrogen and Split Schedules
 # T-AT = transplantation to active tillering, PI = Pinnacle Initiation, F = Flowering, M = Maturation
 NPK_UPTAKE_RATIO = {"T-AT": [20.9,20.6,19.4], "AT-PI": [33.7,43.4,36.5], "PI-F": [39.1,26.7,31.1], "F-M": [6.3,9.6,13]}
+# Maybe not useful ↓
 # Estimation of NPK requirements for rice production in diverse Chinese environments under optimal fertilization rates
 # In this study, the estimated N, P, and K required to produce 1 Mg of rice grain were 21.0, 4.4, and 22.1kg in southern China
 NPK_REQUIRED_RATIO = [21,4.4,22.1]
 
-#TODO: Based on PLant growth stage, refill with water put ratio NPK
-#TODO: PLant will consume NPK with proportion (if more N then more N consume)
+#TODO: Based on Plant growth stage, refill with water put ratio NPK
+#TODO: Plant will consume NPK with proportion (if more N then more N consume)
 
-# ----- CO2 -----
+# ----- CO2 & light-----
 # The optimal atmospheric CO2 concentration for the growth of winter wheat (Triticum aestivum). Journal of Plant Physiology, 184, 89-97. https://doi.org/10.1016/j.jplph.2015.07.003
-TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm)
+TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm) EDIT: Realy depends on the light intensity
+BASE_CO2 = 900
+# Li, J., Zhang, Y., Cheng, R., & Li, T. (2025). Light Spectrum, Intensity, and Photoperiod Are Key for Production as Well as Speed Breeding of Spring Wheat in Indoor Farming. Plant-Environment Interactions, 6(5), e70085. https://doi.org/10.1002/pei3.70085
+# Bugbee, B. G., & Salisbury, F. B. (1988). Exploring the Limits of Crop Productivity : I. Photosynthetic Efficiency of Wheat in High Irradiance Environments. Plant Physiology, 88(3), 869‑878. https://doi.org/10.1104/pp.88.3.869
+IDEAL_LIGHT_INTENSITY = [700,1000] # PPFD
+# IBID
+CO2_TARGET_LIMITS = [400, 1200] # ppm
+
+# Maybe useless ↓
 # CO2 flux in a wheat-soybean succession in subtropical Brazil: A carbon sink. Journal of Environmental Quality, 51, 899–915. https://doi.org/10.1002/jeq2.20362
 CO2_CONSUMPTION = 5.31 # Wheat CO2 Consumption (g CO₂ m⁻² day⁻¹)
-BASE_CO2 = 900
 
 # Let's assume 100,000 px = 1 m²
 PX_TO_SQRT_METER = 100_000
@@ -284,17 +292,50 @@ def calculate_plant_size_farm_m2():
 
 # TODO: Make critic index values have consequences later
 #  (eg. A plant has critic vpd, 5 hours later it appears visible problems if not fixed)
+#TODO: Change smooth curve for mors realistic curve? research realistic data to see how it react to each variable
 def optimal_condition_index(plant_id, co2, light, temperature, humidity):
     """
     The pourcentage of optimal condition respected for the plant to grow perfectly.
     100% the plant grow perfectly, 0% it's dying
     :return: The optimal condition index in %
     """
-    index_vpd = optimal_vpd(plant_id, temperature, humidity)
+    idx_vpd = optimal_vpd(plant_id, temperature, humidity)
     moisture = plants_values[plant_id]["soil_moisture"]
-    index_moisture = optimal_soil(moisture, temperature, humidity)
+    idx_moisture = optimal_soil(moisture, temperature, humidity)
+    data = {x: plants_values[plant_id][x] for x in ["N", "P", "K"]}
+    idx_npk = optimal_npk(data["N"], data["P"], data["K"])
+    idx_co2_light = optimal_co2_light_synergy(co2, light)
 
-    return 0
+    # Define Importance Coefficients
+    weights = {
+        "co2_light": 1.0,
+        "moisture": 1.0,
+        "vpd": 0.8,
+        "npk": 0.5
+    }
+
+    # Calculate Weighted Average
+    scores = {
+        "co2_light": idx_co2_light,
+        "moisture": idx_moisture,
+        "vpd": idx_vpd,
+        "npk": idx_npk
+    }
+
+    weighted_sum = sum(scores[key] * weights[key] for key in weights)
+    total_weights = sum(weights.values())
+
+    average_index = weighted_sum / total_weights
+
+    #  Apply Liebig's Law (The "Limiting Factor" Penalty)
+    # We take the minimum of the "Vitals" (Water, Climate, Light)
+    vitals_min = min(idx_co2_light, idx_moisture, idx_vpd)
+
+    # We blend the average and the minimum.
+    # If vitals_min is 0, the final index will be heavily penalized.
+    final_index = (average_index * 0.6) + (vitals_min * 0.4)
+
+    return round(final_index, 2)
 
 
 def optimal_vpd(plant_id, temp_c, relative_humidity):
@@ -378,6 +419,103 @@ def optimal_soil(current_moisture, temperature, humidity):
         return round(score * 100, 2)
 
     return 0.0
+
+
+def score_single_nutrient(current_ppm, ideal_range, deficient_val):
+    """
+    Calculates a 0-100% score for a single nutrient.
+    High/Over-abundance stays at 100% (Luxury consumption).
+    """
+    min_ideal, max_ideal = ideal_range
+
+    # 1. Below Deficiency (0%)
+    if current_ppm <= deficient_val:
+        return 0.0
+
+    # 2. Within or Above Optimal Range (100%)
+    # PDF mentions 'Luxury Consumption' (page 1), so excess is usually not
+    # harmful for cereal yields in the soil.
+    if current_ppm >= min_ideal:
+        return 100.0
+
+    # 3. Transition from Deficient to Ideal (Smoothstep curve)
+    # Ratio between 0 and 1
+    t = (current_ppm - deficient_val) / (min_ideal - deficient_val)
+    score = (3 * t ** 2 - 2 * t ** 3)
+
+    return round(score * 100, 2)
+
+
+def optimal_npk(n_ppm: int, p_ppm: int, k_ppm: int):
+    """
+    Calculates the global NPK optimality index based on Alberta Agriculture data.
+    """
+    # Configuration based on your provided values (ppm)
+
+    # Calculate individual scores
+    scores = {
+        "N": score_single_nutrient(n_ppm, NPK_SOIL_RATIO_RANGE["N"], DEFICIENT_NPK_SOIL_RATIO["N"]),
+        "P": score_single_nutrient(p_ppm, NPK_SOIL_RATIO_RANGE["P"], DEFICIENT_NPK_SOIL_RATIO["P"]),
+        "K": score_single_nutrient(k_ppm, NPK_SOIL_RATIO_RANGE["K"], DEFICIENT_NPK_SOIL_RATIO["K"])
+    }
+
+    # The Global Index follows the 'Law of the Minimum'
+    # Your plant is only as healthy as its most deficient nutrient.
+    global_index = min(scores.values())
+
+    return global_index
+
+
+def optimal_co2_light_synergy(co2_ppm, ppfd):
+    """
+    Calculates an adequacy score (0-100%) for the combination of CO2 and Light.
+    Based on:
+    - Bugbee & Salisbury (1988) https://doi.org/10.1104/pp.88.3.869: CO2 saturation at 1200 ppm.
+    - Li et al. (2025) https://doi.org/10.1002/pei3.70085: Light optimum for wheat at 700-900 PPFD.
+    - Standard C3 Physiological Heuristic: CO2(ppm) / PPFD(umol) ratio.
+    """
+
+    # 1. NIGHT MODE
+    if ppfd < 30:
+        # At night, CO2 doesn't "combine" with light.
+        # Score returns 100% health-wise unless CO2 is toxic (>2000).
+        return 100.0 if co2_ppm < 2000 else 0.0
+
+    # 2. INTENSITY SAFETY SCORE (Is the light too strong for the species?)
+    _, max_ideal_light = IDEAL_LIGHT_INTENSITY
+    light_score = 1.0
+    if ppfd > 1000:
+        t_light = max(0, (1800 - ppfd) / (1800 - 1000))
+        light_score = (3 * t_light ** 2 - 2 * t_light ** 3)
+
+    # 3. ADEQUACY SCORE (The Balance)
+    # We calculate the "Target CO2" for the current light intensity.
+    target_co2 = ppfd * 1.1
+
+    # Clamp target between ambient (400) and max useful (1200)
+    min_co2, max_co2 = CO2_TARGET_LIMITS
+    target_co2 = max(min_co2, min(max_co2, target_co2))
+
+    if co2_ppm < target_co2:
+        # Case A: CO2 is lower than what the light requires (Limiting factor)
+        # 0.0 score if CO2 is at ambient (400) and light is extreme (1800)
+        t_ratio = (co2_ppm - min_co2-50) / (target_co2 - min_co2-50)
+        adequacy_score = (3 * t_ratio ** 2 - 2 * t_ratio ** 3)
+    else:
+        # Case B: CO2 is higher than target.
+        # Not harmful, but inefficient. We only penalize slightly for waste.
+        # Score stays high (85% minimum) even if CO2 is 2000ppm.
+        if co2_ppm <= 1500:
+            adequacy_score = 1.0
+        else:
+            adequacy_score = max(0.85, 1.0 - ((co2_ppm - 1500) / 2000))
+
+    # 4. FINAL SCORE
+    # The final index is the combination of having enough CO2 for the light
+    # and not having so much light that it kills the plant.
+    final_score = adequacy_score * light_score
+
+    return round(max(0, final_score) * 100, 2)
 
 
 

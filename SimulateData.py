@@ -1,5 +1,7 @@
 import random
 from datetime import timedelta
+from pprint import pprint
+
 import pandas as pd
 import numpy as np
 import math
@@ -17,14 +19,14 @@ import math
 # ==========================================
 # TODO: Create a plant object for facilitation of manipulation
 plants_values = {"PLANT_01":
-                     {"COORDINATES": [0, 1], "N": 200, "P": 75, "K": 200, "green_px": 500, "GLI": 0,
-                      "necrotic_spot": 0, "soil_moisture": 40},
+                     {"COORDINATES": [0, 1], "N": 200, "P": 75, "K": 200, "green_px": 500, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 95, "state": "FI", "state_pct" : 0},
                  "PLANT_02":
-                     {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "green_px": 430, "GLI": 0,
-                      "necrotic_spot": 0, "soil_moisture": 40},
+                     {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "green_px": 430, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 70, "state": "FI", "state_pct" : 47},
                  "PLANT_03":
-                     {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "green_px": 723, "GLI": 0,
-                      "necrotic_spot": 0, "soil_moisture": 40}}
+                     {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "green_px": 723, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 56, "state": "H", "state_pct" : 12}}
 
 # ----- GLI: Green Leaf Index -----
 GLI_THRESHOLD = {"Dead" : 0, "Critic" : 0.1, "Low" : 0.2, "Good" : 0.3}
@@ -36,13 +38,28 @@ NPK_POWDER_RATIO = [[21,21,21], [28,6,5], [6,32,25], [15,10,35]]
 # Minimal NPK concentration (1 ppm = 2 lb/ac) for soil. If below, add to get at least those values + margin
 NPK_SOIL_RATIO_RANGE = {"N": [75,100],"P": [35, 50],"K": [125, 150]} # ppm
 DEFICIENT_NPK_SOIL_RATIO = {"N": 20,"P": 10,"K": 25} # ppm
-# Accumulation of Nutrients (NPK) at Different Growth Stages of Machine Transplanted Rice (Oryza sativa L.) Under Different Levels of Nitrogen and Split Schedules
-# T-AT = transplantation to active tillering, PI = Pinnacle Initiation, F = Flowering, M = Maturation
-NPK_UPTAKE_RATIO = {"T-AT": [20.9,20.6,19.4], "AT-PI": [33.7,43.4,36.5], "PI-F": [39.1,26.7,31.1], "F-M": [6.3,9.6,13]}
-# Maybe not useful ↓
-# Estimation of NPK requirements for rice production in diverse Chinese environments under optimal fertilization rates
-# In this study, the estimated N, P, and K required to produce 1 Mg of rice grain were 21.0, 4.4, and 22.1kg in southern China
-NPK_REQUIRED_RATIO = [21,4.4,22.1]
+# Time of wheat developpment at different stage https://www.fao.org/4/y4011e/y4011e06.htm#bm06
+STATE_SEQUENCE = ["E", "FI", "TS", "FN", "H", "A", "M"]
+PLANT_STATE_TIME = {"E": 20, "FI": 25, "TS": 15, "FN": 30, "H": 10, "A": 40, "M": 10}
+PLANT_STATE_DIC = {"E": "Emergence", "FI": "Floral initiation", "TS": "Terminal spikelet", "FN": "First node",
+                   "H": "Heading", "A": "Anthesis", "M": "Maturity"}
+# Effect of NPK uptake at different growth stages of wheat (Triticum aestivum L.) for yield maximization. AN ASIAN JOURNAL OF SOIL SCIENCE, 9(2) https://doi.org/10.15740/HAS/AJSS/9.2/265-270
+NPK_UPTAKE_RATIO = {"E-FI": [20,16,19], "FI-FN": [37, 32, 30], "FN-H": [16, 39, 36], "H-A": [23, 8, 12], "A-M": [4, 5, 3]}
+NPK_REQUIRED_RATIO = [83,12.27,113.75] # in kg/ha [40, 6, 54] with 125 kg/ha of seeds
+# Convert kg/ha to ppm (Ratio 2:1)
+TOTAL_NPK_PPM = [val/2 for val in NPK_REQUIRED_RATIO]
+
+# Uptake ratios mapped to your STATE_SEQUENCE
+# We split the FI-FN [37, 32, 30] into two parts for TS
+UPTAKE_MAPPING = {
+    "E":  [20, 16, 19],    # Progressing from Emergence to FI
+    "FI": [18.5, 16, 15],  # Progressing from FI to TS (half of FI-FN)
+    "TS": [18.5, 16, 15],  # Progressing from TS to FN (half of FI-FN)
+    "FN": [16, 39, 36],    # Progressing from FN to H
+    "H":  [23, 8, 12],     # Progressing from H to A
+    "A":  [4, 5, 3],       # Progressing from A to M
+    "M":  [0, 0, 0]        # No more uptake at maturity
+}
 
 #TODO: Based on Plant growth stage, refill with water put ratio NPK
 #TODO: Plant will consume NPK with proportion (if more N then more N consume)
@@ -52,7 +69,7 @@ NPK_REQUIRED_RATIO = [21,4.4,22.1]
 TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm) EDIT: Realy depends on the light intensity
 BASE_CO2 = 900
 # Li, J., Zhang, Y., Cheng, R., & Li, T. (2025). Light Spectrum, Intensity, and Photoperiod Are Key for Production as Well as Speed Breeding of Spring Wheat in Indoor Farming. Plant-Environment Interactions, 6(5), e70085. https://doi.org/10.1002/pei3.70085
-# Bugbee, B. G., & Salisbury, F. B. (1988). Exploring the Limits of Crop Productivity : I. Photosynthetic Efficiency of Wheat in High Irradiance Environments. Plant Physiology, 88(3), 869‑878. https://doi.org/10.1104/pp.88.3.869
+# Bugbee, B. G., & Salisbury, F. B. (1988). Exploring the Limits of Crop Productivity : I. Photosynthetic Efficiency of Wheat in High Irradiance Environments. Plant Physiology, 88(3), 869‑878. https://doi.org/10.1104/pp.88.3.869
 IDEAL_LIGHT_INTENSITY = [700,1000] # PPFD
 # IBID
 CO2_TARGET_LIMITS = [400, 1200] # ppm
@@ -233,13 +250,13 @@ def calculate_room_co2_drawdown(plant_size_m2, light_intensity_ppf, current_co2_
     Biomass Production Chamber: Results From An 86-Day Study (January To April 1989)',
     and Gruda et al. (2025) : 'Environmental conditions and nutritional quality of vegetables in protected cultivation'
 
-    Parameters:
-    plant_size_m2: Total vegetative area
-    light_intensity_ppf: Photosynthetic Photon Flux (umol/m2/s)
-    current_co2_ppm: Starting concentration
-    interval_minutes: Elapsed time
-    temp_c: Room temperature in Celsius
-    room_pressure_hpa: Room pressure in hPa
+    Args:
+        plant_size_m2 (float): Total vegetative area
+        light_intensity_ppf (int): Photosynthetic Photon Flux (umol/m2/s)
+        current_co2_ppm (int): Starting concentration
+        interval_minutes (int): Elapsed time
+        temp_c (float): Room temperature in Celsius
+        room_pressure_hpa (float): Room pressure in hPa
     """
 
     # 1. CONSTANTS & GAS PHYSICS
@@ -275,12 +292,12 @@ def calculate_room_co2_drawdown(plant_size_m2, light_intensity_ppf, current_co2_
 
         # 4. CALCULATE TOTAL QUANTITY ABSORBED
     total_seconds = interval_minutes * 60
-    total_umol_absorbed = net_uptake_rate * plant_size_m2 * total_seconds
+    total_mol_absorbed = (net_uptake_rate * plant_size_m2 * total_seconds) / 1_000_000 # convert umol to mol
 
     # 5. CONVERT ABSORBED MICROMOLES TO PPM CHANGE IN ROOM
     # ppm = (micromoles_of_gas / total_moles_of_air)
     total_moles_air_in_room = ROOM_VOLUME_LITERS / molar_volume
-    delta_ppm = total_umol_absorbed / total_moles_air_in_room
+    delta_ppm = total_mol_absorbed / total_moles_air_in_room
 
     final_co2_ppm = current_co2_ppm - delta_ppm
 
@@ -311,7 +328,7 @@ def optimal_condition_index(plant_id, co2, light, temperature, humidity):
         "co2_light": 1.0,
         "moisture": 1.0,
         "vpd": 0.8,
-        "npk": 0.5
+        "npk": 0.5 # TODO: Not vital for 1 or 2 days but if not fixed becomes vital
     }
 
     # Calculate Weighted Average
@@ -335,7 +352,7 @@ def optimal_condition_index(plant_id, co2, light, temperature, humidity):
     # If vitals_min is 0, the final index will be heavily penalized.
     final_index = (average_index * 0.6) + (vitals_min * 0.4)
 
-    return round(final_index, 2)
+    return round(final_index / 100, 3)
 
 
 def optimal_vpd(plant_id, temp_c, relative_humidity):
@@ -350,12 +367,13 @@ def optimal_vpd(plant_id, temp_c, relative_humidity):
 
     # Critic limits
     # TODO: yellow leaves
-    if vpd <= min_crit or vpd >= max_crit:
+    if vpd <= min_crit  or vpd >= max_crit:
         return 0.0
 
     # Optimal state
     if min_ideal <= vpd <= max_ideal:
         return 100.0
+
 
     # Interpolation
     if vpd < min_ideal:
@@ -496,19 +514,22 @@ def optimal_co2_light_synergy(co2_ppm, ppfd):
     min_co2, max_co2 = CO2_TARGET_LIMITS
     target_co2 = max(min_co2, min(max_co2, target_co2))
 
-    if co2_ppm < target_co2:
-        # Case A: CO2 is lower than what the light requires (Limiting factor)
-        # 0.0 score if CO2 is at ambient (400) and light is extreme (1800)
-        t_ratio = (co2_ppm - min_co2-50) / (target_co2 - min_co2-50)
-        adequacy_score = (3 * t_ratio ** 2 - 2 * t_ratio ** 3)
+    adequacy_ratio = co2_ppm / target_co2
+
+    # 4. Scoring the Ratio
+    if 0.9 <= adequacy_ratio <= 1.1:
+        # Perfect balance zone (+/- 10% deviation)
+        adequacy_score = 1.0
+    elif adequacy_ratio < 0.9:
+        # Case: Starvation (CO2 is too low for this light)
+        t = (adequacy_ratio - 0.5) / (0.9 - 0.5)
+        t = max(0, min(1, t))
+        adequacy_score = (3 * t ** 2 - 2 * t ** 3)
     else:
-        # Case B: CO2 is higher than target.
-        # Not harmful, but inefficient. We only penalize slightly for waste.
-        # Score stays high (85% minimum) even if CO2 is 2000ppm.
-        if co2_ppm <= 1500:
-            adequacy_score = 1.0
-        else:
-            adequacy_score = max(0.85, 1.0 - ((co2_ppm - 1500) / 2000))
+        # Case: Waste (CO2 is too high for this light)
+        t = (2.0 - adequacy_ratio) / (2.0 - 1.1)
+        t = max(0, min(1, t))
+        adequacy_score = 0.7 + (0.3 * (3 * t ** 2 - 2 * t ** 3))
 
     # 4. FINAL SCORE
     # The final index is the combination of having enough CO2 for the light
@@ -516,6 +537,120 @@ def optimal_co2_light_synergy(co2_ppm, ppfd):
     final_score = adequacy_score * light_score
 
     return round(max(0, final_score) * 100, 2)
+
+
+def grow_plants_step(p_id, idx_optimal):
+    """
+    Updates the simulation for a period of x hours.
+    """
+    data = plants_values[p_id]
+    step_hours = ROBOT_IDLE_HOURS
+
+    # Update State Percentage
+    current_state = data["state"]
+    days_in_state = PLANT_STATE_TIME[current_state]
+    hours_in_state = days_in_state * 24 * 3 # NOTE: Speed up for simulation
+
+    # Calculate hourly progress adjusted by plant health
+    progress = (step_hours / hours_in_state) * min(idx_optimal+0.3, 1) # For margin (0.7 is good for growth and it doesn't stop completetly)
+
+    data = consume_nutrients(data, progress)
+
+    data["state_pct"] += progress
+
+    if current_state != "M":
+        if data["state_pct"] >= 100:
+            idx_in_seq = STATE_SEQUENCE.index(current_state)
+            next_state = STATE_SEQUENCE[idx_in_seq + 1]
+            data["state"] = next_state
+            data["state_pct"] = 0
+
+    # Green Pixels & Necrosis Logic
+    growth_speed = 0.005
+
+    # GLI is a proxy for 'green density'.
+    pct_val = data["state_pct"] / 1000
+    stage_factor = 0
+    growth_factor = 0
+
+    match current_state:
+        case "M":
+            stage_factor = 1.0 - pct_val * 4 # green decrease from 1 to 0.6
+            growth_factor = -data["green_px"] * data["state_pct"] / 100
+        case "A":
+            stage_factor = 1.0 # green is steady at 1
+            growth_factor = 1.0
+        case "H":
+            stage_factor = 0.8 + pct_val * 2 # green increase from 0.8 to 1
+            growth_factor = data["green_px"] * growth_speed
+        case "FN":
+            stage_factor = 0.5 + pct_val * 3
+            growth_factor = data["green_px"] * growth_speed * 2
+        case "TS":
+            stage_factor = 0.3 + pct_val * 2
+            growth_factor = data["green_px"] * growth_speed * 5
+        case "FI":
+            stage_factor = 0.1 + pct_val * 2
+            growth_factor = data["green_px"] * growth_speed * 4
+        case "E":
+            stage_factor = pct_val
+            growth_factor = data["state_pct"]
+        case _:
+            stage_factor = 0.0
+            growth_factor = 0.0
+
+    # Base GLI = Current health * max possible GLI * stage maturity
+    # Max GLI 0.8 for realism
+    calculated_gli = idx_optimal * stage_factor * 0.8
+
+    data["GLI"] = round(max(0.0, min(0.6, calculated_gli)), 3)
+
+    if idx_optimal > 0.6:  # Healthy growth
+        new_px = (idx_optimal - 0.5) * growth_factor * step_hours
+        data["green_px"] += int(new_px)
+        # TODO: Necrotic spot are more complexe! to improve (delayed if thirst, etc...) + take in consideration night time
+        if data["necrotic_spot"]>0:
+            data["necrotic_spot"] -= int(new_px / (24/step_hours))
+            data["green_px"] += int(new_px / (24/step_hours))
+    elif idx_optimal < 0.4:  # Stress leads to necrosis
+        damage = (0.5 - idx_optimal) * growth_factor * step_hours
+        data["green_px"] -= int(damage)
+        data["necrotic_spot"] += int(damage)
+
+    plants_values[p_id] = data
+    if p_id == "PLANT_01":
+        print(idx_optimal)
+        pprint(data)
+
+    return
+
+
+def consume_nutrients(plant_data, progress_pct):
+    """
+    Reduces N, P, K in the soil based on the growth progress of the current state.
+    :param plant_data: The dictionary of the specific plant
+    :param progress_pct: The percentage of state progress made in this step (float)
+    """
+    state = plant_data["state"]
+
+    if state not in UPTAKE_MAPPING or state == "M":
+        return plant_data
+
+    # Get the distribution ratio for the current state
+    ratios = UPTAKE_MAPPING[state]
+
+    # Calculation:
+    # (Total PPM needed for life) * (% allocated to this state) * (% of state completed now)
+    consumption_n = TOTAL_NPK_PPM[0] * (ratios[0] / 100) * (progress_pct / 100)
+    consumption_p = TOTAL_NPK_PPM[1] * (ratios[1] / 100) * (progress_pct / 100)
+    consumption_k = TOTAL_NPK_PPM[2] * (ratios[2] / 100) * (progress_pct / 100)
+
+    # Reduce soil values (ensuring they don't go below 0)
+    plant_data["N"] = max(0, round(plant_data["N"] - consumption_n, 4))
+    plant_data["P"] = max(0, round(plant_data["P"] - consumption_p, 4))
+    plant_data["K"] = max(0, round(plant_data["K"] - consumption_k, 4))
+
+    return plant_data
 
 
 
@@ -536,6 +671,7 @@ def create_smart_farm_db(input_csv_path):
 
     co2_in_farm = BASE_CO2
 
+
     # B. Generate data for each timestamp
     for ts, row in df_resampled.iterrows():
         air_temp = add_realistic_noise(row['temp'], 0.1)
@@ -545,7 +681,6 @@ def create_smart_farm_db(input_csv_path):
         co2 = add_realistic_noise(co2_in_farm, 1)
 
         # C. Broadcast ambient data to all 3 plants
-
         # Check if robot is probing (Every 2 hours on the dot)
         is_probed = 1 if (ts.hour % ROBOT_IDLE_HOURS == 0 and ts.minute == 0) else 0
 
@@ -553,7 +688,8 @@ def create_smart_farm_db(input_csv_path):
 
             # Add slight delta for robot time to take measure
             # maybe model will be better with timestamp of initial command (so ambiant values changes a bit?)
-            ts += timedelta(seconds=random.randint(30,45))
+            if is_probed:
+                ts += timedelta(seconds=random.randint(30,45))
 
             p_data = {
                 "TimeStamp": ts,
@@ -566,15 +702,18 @@ def create_smart_farm_db(input_csv_path):
                 "IsProbed": is_probed
             }
 
+
             # Robot Specific Data (Only 'Measured' if IsProbed == 1)
             if is_probed:
+                optimal_idx = optimal_condition_index(p_id, co2, light, air_temp, humidity)
+                grow_plants_step(p_id, optimal_idx)
                 p_data["N"] = values["N"]
                 p_data["P"] = values["P"]
                 p_data["K"] = values["K"]
                 p_data["green_px"] = values["green_px"]
-                p_data["Size"] = values["size"]
-                p_data["Leaf_temp"] = p_data["Air_temp"] - 1.8
-                p_data["Soil_Moisture"] = values["soil_moisture"]
+                # p_data["Size"] = values["size"]
+                # p_data["Leaf_temp"] = p_data["Air_temp"] - 1.8
+                # p_data["Soil_Moisture"] = values["soil_moisture"]
             else:
                 p_data["NPK"] = np.nan
                 p_data["RGB_Metrics"] = np.nan
@@ -582,6 +721,8 @@ def create_smart_farm_db(input_csv_path):
                 p_data["Soil_Moisture"] = np.nan
 
             final_rows.append(p_data)
+            final_rows.append(p_data)
+
 
         co2_in_farm = calculate_room_co2_drawdown(
                 plant_size_m2=calculate_plant_size_farm_m2(),
@@ -609,5 +750,4 @@ def create_smart_farm_db(input_csv_path):
 smart_farm_data = create_smart_farm_db(CSV_FILE)
 
 # Display result
-print(smart_farm_data.head(15))
-smart_farm_data.to_csv("final_smart_farm_dataset2.csv", index=False)
+smart_farm_data.to_csv("test.csv", index=False)

@@ -7,6 +7,14 @@ import math
 
 #TODO: At the end if this script is robust, use it to train the model in reinforcement learning.
 
+#TODO: Make use of in between probe values (make the plant respond to growth every 15min but input the value only when probed)
+#TODO: Effect are delayed (low moisture cause yellowish some hours laters)
+#TODO: Effect of long time ( if light is low for too long it causes damage but if it is low only 1 hours it is okay)
+#TODO: Implement stress state for data (data should have plants that growth well and plant that dies for the model to learn)
+#TODO: Refill NPK and CO2 if critical level are reached (might depend on the stress states)
+#TODO: For data make multiple farms with 5 plants each for training the model
+#TODO: Make a dead state for the plant (if vital has been too low for too long, stop the data of this plant)
+
 # Maybe use other growth stages? https://en.wikipedia.org/wiki/Cereal_growth_staging_scales
 
 # Useful links:
@@ -18,14 +26,14 @@ import math
 # ==========================================
 # TODO: Create a plant object for facilitation of manipulation
 plants_values = {"PLANT_01":
-                     {"COORDINATES": [0, 1], "N": 200, "P": 75, "K": 200, "green_px": 500, "GLI": 0.0,
-                      "necrotic_spot": 0, "soil_moisture": 95, "state": "FI", "state_pct" : 0},
+                     {"COORDINATES": [0, 1], "N": 200, "P": 75, "K": 200, "green_px": 0, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 95, "state": "E", "state_pct" : 0},
                  "PLANT_02":
-                     {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "green_px": 430, "GLI": 0.0,
-                      "necrotic_spot": 0, "soil_moisture": 70, "state": "FI", "state_pct" : 47},
+                     {"COORDINATES": [0, 2], "N": 100, "P": 50, "K": 200, "green_px": 0, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 70, "state": "E", "state_pct" : 0},
                  "PLANT_03":
-                     {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "green_px": 723, "GLI": 0.0,
-                      "necrotic_spot": 0, "soil_moisture": 56, "state": "H", "state_pct" : 12}}
+                     {"COORDINATES": [1, 1], "N": 200, "P": 50, "K": 100, "green_px": 0, "GLI": 0.0,
+                      "necrotic_spot": 0, "soil_moisture": 56, "state": "E", "state_pct" : 0}}
 
 # ----- GLI: Green Leaf Index -----
 GLI_THRESHOLD = {"Dead" : 0, "Critic" : 0.1, "Low" : 0.2, "Good" : 0.3}
@@ -122,11 +130,13 @@ ROBOT_IDLE_HOURS = 2  # Robot probes every 2 hours
 
 #TODO: From moisture measure ration NPK asume concentration then predict output of sensor
 
-CSV_FILE = r"WeatherJanv2026/Final/WeatherJanv2026.csv"
+CSV_FILE = r"Meteo_Bangkok_2025.csv"
 
 # ==========================================
 # 2. BIOLOGICAL & ENVIRONMENTAL FUNCTIONS
 # ==========================================
+
+# TODO: Make sigmoid for a more realistic data in different stages (NPK, Growth, etc) at beginning of stage slow then fast then slow
 
 def estimate_solar_radiation(latitude, jour_annee, t_max, t_min):
     """
@@ -336,10 +346,14 @@ def optimal_condition_index(plant_id, co2, light, temperature, humidity):
     avg_score = (idx_co2_light + idx_moisture + idx_vpd + idx_npk) / 4 / 100
     limiting_factor = min(idx_co2_light, idx_moisture, idx_vpd) / 100
 
+
     final_index = avg_score * (limiting_factor ** 0.5)
     # NOTE: For data to be more kind (real data are too harsh for simulated data, it will only penalize the model (it will have more data w/o it later)
     final_index = min(final_index+0.2, 1)
-
+    if plant_id == "PLANT_01":
+        for x,y  in {"idx_co2_light":idx_co2_light, "idx_moisture":idx_moisture, "idx_vpd":idx_vpd, "idx_npk":idx_npk}.items():
+            print(f"STATE '{x}': {y}")
+        print(f"FINAL INDEX: {final_index}")
     return round(final_index, 3)
 
 
@@ -712,10 +726,12 @@ def create_smart_farm_db(input_csv_path):
 
     # B. Generate data for each timestamp
     for ts, row in df_resampled.iterrows():
+        print(ts)
         air_temp = add_realistic_noise(row['temp'], 0.1)
         humidity = add_realistic_noise(row['rhum'], 0.1)
         pressure = add_realistic_noise(row['pres'], 0.1)
-        light = add_realistic_noise(calculate_sunlight(ts.hour+ts.minute/60.0),10)
+        light_no_noise = calculate_sunlight(ts.hour+ts.minute/60.0)
+        light = add_realistic_noise(light_no_noise,light_no_noise/100 + 5)
         co2 = add_realistic_noise(co2_in_farm, 1)
         wspd = add_realistic_noise(row['wspd'],0.1)
 

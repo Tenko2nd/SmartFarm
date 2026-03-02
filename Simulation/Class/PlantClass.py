@@ -68,7 +68,7 @@ class Plant(object):
         idx_vpd = self._optimal_vpd(env_conditions['vpd'])
         idx_moisture = self._optimal_soil(self.moisture, env_conditions['vpd'])
         idx_npk = self._optimal_npk(self.N, self.P, self.K)
-        co2, light = env_conditions["c02"], env_conditions["light"]
+        co2, light = env_conditions["CO2"], env_conditions["LightIntensity"]
         idx_co2_light = self._optimal_co2_light_synergy(co2, light)
 
         avg_score = (idx_co2_light + idx_moisture + idx_vpd + idx_npk) / 4
@@ -127,7 +127,6 @@ class Plant(object):
 
         # 3. SCORING LOGIC
         # Case A: Below Critical Minimum (Death zone)
-        # TODO: yellow leaves
         if current_moisture <= min_crit:
             self.moisture = dynamic_target + random.gauss(0, 3)
             return 0.0

@@ -20,7 +20,7 @@ class Farm(object):
         self.light_intensity_deviation = random.gauss(0, 100)
         self.pressure_deviation = random.gauss(50, 150)
         # Environment values
-        self.temp_extreme = [0, 0]  # Temperature minimal and maximal of the day
+        self.temp_extreme = {"min": 0, "max": 0}  # Temperature minimal and maximal of the day
         self.temperature = None
         self.humidity = None
         self.light_intensity = None
@@ -28,6 +28,8 @@ class Farm(object):
         self.vpd = None
         self.et0 = None
         self.co2 = random.randint(750, 1100)
+        # Dict for data
+        self.current_condition = {}
 
     def get_farm_environment(self):
         env = {"Temperature": self.temperature, "Humidity": self.humidity, "LightIntensity": self.light_intensity,
@@ -49,6 +51,9 @@ class Farm(object):
         self._calculate_vpd()
         self._calculate_room_co2_drawdown()
         self._calculate_fao56_et0(timestamp=timestamp)
+        self._update_env_dict()
+        for plant in self.plants:
+            plant.grow(env_conditions=self.get_farm_environment())
 
     def _calculate_room_co2_drawdown(self):
         """
@@ -147,8 +152,7 @@ class Farm(object):
         # 2. Ajustement selon l'écart de température (Hargreaves)
         # k_rs est un coefficient d'ajustement (0.16 pour l'intérieur des terres)
         k_rs = 0.16
-        rs = k_rs * math.sqrt(self.temp_extreme[1] - self.temp_extreme[0]) * ra
-
+        rs = k_rs * math.sqrt(self.temp_extreme["max"] - self.temp_extreme["min"]) * ra
         return rs
 
     def _calculate_fao56_et0(self, timestamp, solar_rad=None):
@@ -185,4 +189,8 @@ class Farm(object):
         numerator = (0.408 * delta * (rn - g)) + (gamma * (900 / (self.temperature + 273)) * wind_speed * self.vpd)
         denominator = delta + (gamma * (1 + 0.34 * wind_speed))
 
-        self.et0 = round(numerator / denominator,2)
+        self.et0 = round(numerator / denominator,5)
+
+    def _update_env_dict(self):
+        self.current_condition = {"Temperature": self.temperature, "Humidity": self.humidity,
+                                  "LightIntensity": self.light_intensity, "CO2": self.co2,}

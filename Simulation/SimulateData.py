@@ -12,30 +12,25 @@ import Simulation.utils.Constants as C
 
 #TODO: At the end if this script is robust, use it to train the model in reinforcement learning.
 
-#TODO: Make use of in between probe values (make the plant respond to growth every 15min but input the value only when probed)
 #TODO: Effect are delayed (low moisture cause yellowish some hours laters)
 #TODO: Effect of long time ( if light is low for too long it causes damage but if it is low only 1 hours it is okay)
 #TODO: Implement stress state for data (data should have plants that growth well and plant that dies for the model to learn)
 #TODO: Refill NPK and CO2 if critical level are reached (might depend on the stress states)
-#TODO: For data make multiple farms with 5 plants each for training the model
 #TODO: Make a dead state for the plant (if vital has been too low for too long or necrosis >90%, stop the data of this plant)
 #TODO: Make a file for different farm environment in order to give the model multiple scenarii
 
 #TODO: Based on Plant growth stage, refill with water put ratio NPK
-#TODO: Plant will consume NPK with proportion (if more N then more N consume)
-#TODO: From moisture measure ration NPK assume concentration then predict output of sensor
-#TODO: Create a plant object for facilitation of manipulation
 #TODO: Make sigmoid for a more realistic data in different stages (NPK, Growth, etc) at beginning of stage slow then fast then slow
 
 class SimulationManager:
     def __init__(self, weather_csv):
         self.weather_df = self._init_weather_dataframe(weather_csv)
-        self.farms = [Farm(i, 5) for i in range(5)]
+        self.farms = [Farm(i, 3) for i in range(2)]
 
         self.data_storage = []
         self.current_running_month = None
 
-        self.today = self.weather_df.index[0].date()
+        self.today = self.weather_df.index[0].normalize()
         self.daily_temp_extremes = self.weather_df['temp'].resample('D').agg(['min', 'max'])
 
     def run(self):
@@ -50,16 +45,16 @@ class SimulationManager:
         for day_timestamp, day_df in tqdm(daily_groups, desc="Simulating Days"):
 
             # DAILY UPDATES (Run once per day)
-            self.today = day_timestamp.date()
-            self._update_todays_data()
+            self.today = day_timestamp
+            self._update_today_data()
 
             for row in day_df.itertuples():
                 ts = row.Index
 
                 # Daily updates
-                if ts.date() > self.today:
-                    self.today = ts.date()
-                    self._update_todays_data()
+                if ts.normalize() > self.today:
+                    self.today = ts.normalize()
+                    self._update_today_data()
 
                 env = {
                     "Temperature": row.temp,
@@ -71,13 +66,12 @@ class SimulationManager:
                 for farm in self.farms:
                     farm.update_farm_environment(env=env, timestamp=ts)
                     for plant in farm.plants:
+                        if row.is_probed:
+                            plant.record_probe()
                         self.data_storage.append({
                             "timestamp": ts,
                             "plant_id": plant.id,
-                            "temp": farm.temperature,
-                            "humidity": farm.humidity,
-                            "light": farm.light_intensity,
-                            "co2": farm.co2,
+                            **farm.current_condition,
                             "is_probed": row.is_probed,
                             **plant.last_observation  # Unpack observation dictionary
                         })
@@ -106,20 +100,21 @@ class SimulationManager:
         weather_df = weather_df.resample(f'{C.DATA_UPDATE_MIN}min').interpolate(method='cubicspline')
         return weather_df
 
-    def _update_todays_data(self):
+    def _update_today_data(self):
         temp_extreme = self._get_day_temp_extremes(self.today)
         if temp_extreme is not None:
             for farm in self.farms:
                 farm.update_extreme_temp(temp_extreme)
 
-
     def _get_day_temp_extremes(self, target_date):
-        stats = self.daily_temp_extremes.get(target_date)
-        if stats:
-            return dict(stats)
-        return None
+        try:
+            stats = self.daily_temp_extremes.loc[target_date]
+            return stats.to_dict()
+        except KeyError:
+            return None
 
-    def _calculate_sunlight(self, timestamp: datetime, max_ppfd=2000):
+    @staticmethod
+    def _calculate_sunlight(timestamp: datetime, max_ppfd=2000):
         """
         Calculates instantaneous PPFD based on Latitude, Longitude, and Time.
 

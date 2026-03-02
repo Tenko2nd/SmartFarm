@@ -25,7 +25,7 @@ import Simulation.utils.Constants as C
 class SimulationManager:
     def __init__(self, weather_csv):
         self.weather_df = self._init_weather_dataframe(weather_csv)
-        self.farms = [Farm(i, 3) for i in range(2)]
+        self.farms = [Farm(i, 3) for i in range(1)]
 
         self.data_storage = []
         self.current_running_month = None
@@ -64,7 +64,8 @@ class SimulationManager:
                 }
 
                 for farm in self.farms:
-                    farm.update_farm_environment(env=env, timestamp=ts)
+                    farm.current_time = ts
+                    farm.update_farm_environment(env=env)
                     for plant in farm.plants:
                         if row.is_probed:
                             plant.record_probe()
@@ -113,6 +114,7 @@ class SimulationManager:
         except KeyError:
             return None
 
+    # NOTE: For smartfarm with possibility to control the light, using the DLI (daily light integral) might be better
     @staticmethod
     def _calculate_sunlight(timestamp: datetime, max_ppfd=2000):
         """

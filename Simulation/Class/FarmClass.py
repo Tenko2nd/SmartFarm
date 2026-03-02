@@ -13,6 +13,7 @@ class Farm(object):
             Plant(f"P_{farm_id}_{i}", [i // 2, i % 2])
             for i in range(nb_plants)
         ]
+        self.current_time = None
         # Internal characteristics
         #TODO: For scenarii, change the deviation drastically over short time to stress the plant
         self.temperature_deviation = random.uniform(-10, 5)
@@ -30,6 +31,7 @@ class Farm(object):
         self.co2 = random.randint(750, 1100)
         # Dict for data
         self.current_condition = {}
+        self.death_grace_period_days = 7
 
     def get_farm_environment(self):
         env = {"Temperature": self.temperature, "Humidity": self.humidity, "LightIntensity": self.light_intensity,
@@ -43,16 +45,22 @@ class Farm(object):
         """
         self.temp_extreme = {k: v + self.temperature_deviation for k, v in temp_extreme.items()}
 
-    def update_farm_environment(self, env, timestamp):
+    def update_farm_environment(self, env):
         self.temperature = env["Temperature"] + self.temperature_deviation
         self.humidity = env["Humidity"] + self.humidity_deviation
         self.light_intensity = env["LightIntensity"] + self.light_intensity_deviation
         self.pressure = env["Pressure"] + self.pressure_deviation
         self._calculate_vpd()
         self._calculate_room_co2_drawdown()
-        self._calculate_fao56_et0(timestamp=timestamp)
+        self._calculate_fao56_et0(timestamp=self.current_time)
         self._update_env_dict()
         for plant in self.plants:
+            plant.current_time = self.current_time
+            if plant.is_dead:
+                days_since_death = (self.current_time - plant.death_timestamp).days
+                if days_since_death > self.death_grace_period_days:
+                    self.plantList.remove(plant)
+                    continue
             plant.grow(env_conditions=self.get_farm_environment())
 
     def _calculate_room_co2_drawdown(self):

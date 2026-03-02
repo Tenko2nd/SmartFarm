@@ -1,6 +1,36 @@
 import random
 import Simulation.utils.Constants as C
 
+# OPTIMIZATION: the damage buffer gestion can be improved, reduce functions call
+
+class StressBuffer:
+    def __init__(self, name, recovery_rate, threshold=0.8):
+        self.name = name
+        self.value = 0.0 # 0.0 to 1.0
+        self.threshold = threshold # At what point does this cause damage?
+        self.recovery_rate = recovery_rate # How fast it drains when stress is gone
+
+    def add_stress(self, amount):
+        """Adds stress, but caps it so it doesn't become infinite."""
+        self.value = min(1.0, self.value + amount)
+
+    def recover(self):
+        """Naturally reduces stress over time."""
+        self.value = max(0.0, self.value - self.recovery_rate)
+
+    @property
+    def damage_multiplier(self):
+        """
+        If the buffer is over the threshold, return the excess.
+        Example: If value is 1.2 and threshold is 1.0, return 0.2.
+        """
+        if self.value > self.threshold:
+            return self.value - self.threshold
+        return 0.0
+
+    def is_empty(self):
+        return self.value <= 0
+
 class Plant(object):
     def __init__(self, plant_id, coordinate):
         # Identification
@@ -19,8 +49,11 @@ class Plant(object):
         self.stage_pct = 0
         self.health_score = None
         self.is_dead = False
-        self.damage_buffer = {}
+        self.damage_buffers = {}
+        self.death_timestamp = None
 
+        self.ticks_day = 24 * 60 * C.DATA_UPDATE_MIN
+        self.current_time = None
         self.last_observation = {}
         self.record_probe()
 
@@ -55,10 +88,14 @@ class Plant(object):
 
         self._update_pixels(light_intensity=env_conditions["LightIntensity"])
         self._update_gli()
+        self._update_damages()
+        self._has_it_died()
 
     # TODO: Make critic index values have consequences later
     #  (eg. A plant has critic vpd, 5 hours later it appears visible problems if not fixed)
     # TODO: Change smooth curve for mors realistic curve? research realistic data to see how it react to each variable
+
+    # DEPRECATED: use the damage_buffers with the add_stress method for monitoring health and damage instead
     def _calculate_health_score(self, env_conditions):
         """
         The pourcentage of optimal condition respected for the plant to grow perfectly.
@@ -78,8 +115,8 @@ class Plant(object):
         # NOTE: For data to be more kind (real data are too harsh for simulated data, it will only penalize the model (it will have more data w/o it later)
         self.health_score = min(health_score + 0.2, 1)
 
-    @staticmethod
-    def _optimal_vpd(vpd):
+
+    def _optimal_vpd(self, vpd):
         """
         Calcule l'optimalité du climat pour le blé dur.
         """
@@ -87,13 +124,14 @@ class Plant(object):
         min_ideal, max_ideal = C.IDEAL_VPD_RANGE
         min_crit, max_crit = C.CRITICAL_VPD_RANGE
 
+        score = 0.0
         # Critic limits
         if vpd <= min_crit or vpd >= max_crit:
-            return 0.0
+            score = 0.0
 
         # Optimal state
         if min_ideal <= vpd <= max_ideal:
-            return 1.0
+            score = 1.0
 
         # Interpolation
         if vpd < min_ideal:
@@ -102,8 +140,12 @@ class Plant(object):
             t = (max_crit - vpd) / (max_crit - max_ideal)
 
         # Quadratic smoothing
-        score = (3 * t ** 2 - 2 * t ** 3)
-        return round(score, 3)
+        score = round((3 * t ** 2 - 2 * t ** 3), 3)
+
+        tick_to_fill = 1.5 * self.ticks_day #RESEARCH
+        self._apply_environmental_stress("vpd", score, tick_to_fill, recover_ratio=4)
+
+        return score
 
     def _optimal_soil(self, current_moisture, vpd):
         """
@@ -125,34 +167,36 @@ class Plant(object):
         # This is the "Perfect" moisture point for the current weather
         dynamic_target = moisture_low + (vpd_ratio * (moisture_high - moisture_low))
 
+        score = 0.0
         # 3. SCORING LOGIC
         # Case A: Below Critical Minimum (Death zone)
         if current_moisture <= min_crit:
             self.moisture = dynamic_target + random.gauss(0, 3)
-            return 0.0
+            score = 0.0
 
         # Case B: Within a small buffer around the dynamic target (Perfect zone)
         # We allow a +/- 5% tolerance for 100% score
-        if (dynamic_target - 5) <= current_moisture <= (dynamic_target + 5):
-            return 1.0
+        elif (dynamic_target - 5) <= current_moisture <= (dynamic_target + 5):
+            score = 1.0
 
         # Case C: Between Critical Min and Target (Drought Stress)
-        if current_moisture < dynamic_target:
+        elif current_moisture < dynamic_target:
             t = (current_moisture - min_crit) / ((dynamic_target - 5) - min_crit)
-            score = (3 * t ** 2 - 2 * t ** 3)  # Smoothstep
-            return round(score, 3)
+            score = round((3 * t ** 2 - 2 * t ** 3), 3)  # Smoothstep
 
         # Case D: Above Target (Saturation / Over-watering)
         # Higher is better than lower: the score only drops to 60% health at saturation
-        if current_moisture > dynamic_target:
+        elif current_moisture > dynamic_target:
             # Distance from target to 100% moisture
             t = (max_crit - current_moisture) / (max_crit - (dynamic_target + 5))
             smooth = (3 * t ** 2 - 2 * t ** 3)
             # We remap the score so it goes from 100% down to 50% (instead of 0%)
-            score = 0.5 + (0.5 * smooth)
-            return round(score, 3)
+            score = round(0.5 + (0.5 * smooth), 3)
 
-        return 0.0
+        ticks_to_fill = 3 * self.ticks_day #RESEARCH
+        self._apply_environmental_stress("moisture", score+0.2, ticks_to_fill, recover_ratio=0.5)
+
+        return score
 
     @staticmethod
     def _score_single_nutrient(current_ppm, ideal_range, deficient_val):
@@ -196,10 +240,12 @@ class Plant(object):
         # Your plant is only as healthy as its most deficient nutrient.
         global_index = min(scores.values())
 
+        self._apply_environmental_stress("NPK", global_index, self.ticks_day * 5, recover_ratio=0.5) #RESEARCH
+
         return global_index
 
-    @staticmethod
-    def _optimal_co2_light_synergy(co2_ppm, ppfd):
+
+    def _optimal_co2_light_synergy(self, co2_ppm, ppfd):
         """
         Calculates an adequacy score (0-100%) for the combination of CO2 and Light.
         Based on:
@@ -208,20 +254,27 @@ class Plant(object):
         - Standard C3 Physiological Heuristic: CO2(ppm) / PPFD(umol) ratio.
         """
 
-        # 1. NIGHT MODE
-        if ppfd < 30:
-            # At night, CO2 doesn't "combine" with light.
-            # Score returns 100% health-wise unless CO2 is toxic (>2000).
-            return 1.0 if co2_ppm < 2000 else 0.0
-
-        # 2. INTENSITY SAFETY SCORE (Is the light too strong for the species?)
-        _, max_ideal_light = C.IDEAL_LIGHT_INTENSITY
+        # INTENSITY SAFETY SCORE (Is the light too strong for the species?)
+        max_ideal_light = C.IDEAL_LIGHT_INTENSITY
         light_score = 1.0
-        if ppfd > 1000:
-            t_light = max(0, (1800 - ppfd) / (1800 - 1000))
+        if ppfd > max_ideal_light:
+            t_light = max(0, (2500 - ppfd) / (2500 - 1000))
             light_score = (3 * t_light ** 2 - 2 * t_light ** 3)
+            ticks_to_fill = 1.5 * self.ticks_day # Can survive up to 1.5 days with too much light #RESEARCH
+            self._apply_environmental_stress("highLight", light_score, ticks_to_fill, recover_ratio=2)
+            self._apply_environmental_stress("lowLight", 1, ticks_to_fill, recover_ratio=2) # recover
+        elif ppfd < 200:
+            t_light = max(0, (ppfd - 50) / (300 - 50))
+            light_score = (3 * t_light ** 2 - 2 * t_light ** 3)
+            ticks_to_fill = 3 * self.ticks_day # Can survive up to 3 days without any light #RESEARCH
+            self._apply_environmental_stress("lowLight", light_score, ticks_to_fill, recover_ratio=2)
+            self._apply_environmental_stress("highLight", 1, ticks_to_fill, recover_ratio=2)
+        else: # Recover in case everything is fine
+            self._apply_environmental_stress("lowLight", 1, 0, recover_ratio=2)
+            self._apply_environmental_stress("highLight", 1, 0, recover_ratio=2)
 
-        # 3. ADEQUACY SCORE (The Balance)
+
+        # ADEQUACY SCORE (The Balance)
         # We calculate the "Target CO2" for the current light intensity.
         target_co2 = ppfd * 1.1
 
@@ -231,7 +284,7 @@ class Plant(object):
 
         adequacy_ratio = co2_ppm / target_co2
 
-        # 4. Scoring the Ratio
+        # Scoring the Ratio
         if 0.9 <= adequacy_ratio <= 1.1:
             # Perfect balance zone (+/- 10% deviation)
             adequacy_score = 1.0
@@ -241,12 +294,15 @@ class Plant(object):
             t = max(0, min(1, t))
             adequacy_score = (3 * t ** 2 - 2 * t ** 3)
         else:
-            # Case: Waste (CO2 is too high for this light)
+            # Case: Waste (CO2 is too high for this light) stress is minimum
             t = (2.0 - adequacy_ratio) / (2.0 - 1.1)
             t = max(0, min(1, t))
-            adequacy_score = 0.7 + (0.3 * (3 * t ** 2 - 2 * t ** 3))
+            adequacy_score = 0.9 + (0.1 * (3 * t ** 2 - 2 * t ** 3))
 
-        # 4. FINAL SCORE
+        ticks_to_fill = 2  * self.ticks_day #RESEARCH
+        self._apply_environmental_stress("CO2", adequacy_score, ticks_to_fill, recover_ratio=5)
+
+        # FINAL SCORE
         # The final index is the combination of having enough CO2 for the light
         # and not having so much light that it kills the plant.
         final_score = adequacy_score * light_score
@@ -304,6 +360,7 @@ class Plant(object):
         #TODO: add some noise? create a function global
         self.moisture = round(max(0, self.moisture - pct_loss), 5)
 
+    # TODO: Improve health gestion, make it better
     def _update_pixels(self, light_intensity):
 
         growth_speed = 0.01
@@ -381,8 +438,37 @@ class Plant(object):
             "green_pixels": self.green_pixels,
             "necrotic_pixels": self.necrotic_pixels,
             "gli": self.GLI,
-            "growth_stage": self.growth_stage
+            "growth_stage": self.growth_stage,
+            "is_alive": 0 if self.is_dead else 1,
         }
 
+    def _has_it_died(self):
+        if self.green_pixels < (self.green_pixels+self.necrotic_pixels)*0.15:
+            self.is_dead = True
+            self.death_timestamp = self.current_time
 
+    def _apply_environmental_stress(self, stress_name, score, ticks_to_fill, threshold=0.8, recover_ratio=2.0):
+        """
+        score: 0.0 (bad) to 1.0 (perfect)
+        ticks_to_fill: How many updates it takes to fill the buffer at max stress
+        """
+        # Create the buffer if it doesn't exist yet
+        if stress_name not in self.damage_buffers and score < 1.0:
+            rec_rate = (1.0 / ticks_to_fill) * recover_ratio
+            self.damage_buffers[stress_name] = StressBuffer(stress_name, rec_rate, threshold)
 
+        buffer = self.damage_buffers[stress_name]
+
+        #  Update logic: If score is low, add stress. If score is high, recover.
+        if score < 1.0:
+            increment = (1.0 - score) / ticks_to_fill
+            buffer.add_stress(increment)
+        else:
+            buffer.recover()
+
+    def _update_damages(self):
+        damages = max([buf.damage_multiplier * 5 for buf in self.damage_buffers.values()])
+
+        finished = [name for name, buf in self.damage_buffers.items() if buf.is_empty()]
+        for name in finished:
+            del self.damage_buffers[name]

@@ -44,7 +44,7 @@ TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm) EDIT: Realy de
 BASE_CO2 = 900
 # Li, J., Zhang, Y., Cheng, R., & Li, T. (2025). Light Spectrum, Intensity, and Photoperiod Are Key for Production as Well as Speed Breeding of Spring Wheat in Indoor Farming. Plant-Environment Interactions, 6(5), e70085. https://doi.org/10.1002/pei3.70085
 # Bugbee, B. G., & Salisbury, F. B. (1988). Exploring the Limits of Crop Productivity : I. Photosynthetic Efficiency of Wheat in High Irradiance Environments. Plant Physiology, 88(3), 869‑878. https://doi.org/10.1104/pp.88.3.869
-IDEAL_LIGHT_INTENSITY = [700,1000] # PPFD
+IDEAL_LIGHT_INTENSITY = 2000 # PPFD #The higher the better based on bugbee and al
 # IBID
 CO2_TARGET_LIMITS = [400, 1200] # ppm
 

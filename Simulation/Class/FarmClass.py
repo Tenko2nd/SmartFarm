@@ -16,10 +16,10 @@ class Farm(object):
         self.current_time = None
         # Internal characteristics
         #TODO: For scenarii, change the deviation drastically over short time to stress the plant
-        self.temperature_deviation = random.uniform(-10, 5)
-        self.humidity_deviation = random.uniform(-20, 10)
-        self.light_intensity_deviation = random.gauss(0, 100)
-        self.pressure_deviation = random.gauss(50, 150)
+        self.temperature_deviation = 0 #random.uniform(-10, 5)
+        self.humidity_deviation = +10 #random.uniform(-20, 10)
+        self.light_intensity_deviation = 0 #random.gauss(0, 100)
+        self.pressure_deviation = 0 #random.gauss(50, 150)
         # Environment values
         self.temp_extreme = {"min": 0, "max": 0}  # Temperature minimal and maximal of the day
         self.temperature = None
@@ -28,7 +28,7 @@ class Farm(object):
         self.pressure = None
         self.vpd = None
         self.et0 = None
-        self.co2 = random.randint(750, 1100)
+        self.co2 = 900
         # Dict for data
         self.current_condition = {}
         self.death_grace_period_days = 7
@@ -113,7 +113,7 @@ class Farm(object):
         total_moles_air_in_room = C.ROOM_VOLUME_LITERS / molar_volume
         delta_ppm = total_mol_absorbed / total_moles_air_in_room
 
-        self.co2 = round(self.co2 - delta_ppm, 2)
+        self.co2 = round(self.co2 - delta_ppm, 2) if self.co2 > 850 else self.co2 + random.randint(75, 125)
 
     def _calculate_vpd(self):
         """
@@ -200,5 +200,5 @@ class Farm(object):
         self.et0 = round(numerator / denominator,5)
 
     def _update_env_dict(self):
-        self.current_condition = {"Temperature": self.temperature, "Humidity": self.humidity,
+        self.current_condition = {"Temperature": self.temperature, "Humidity": round(self.humidity),
                                   "LightIntensity": self.light_intensity, "CO2": self.co2,}

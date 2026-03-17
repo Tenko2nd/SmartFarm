@@ -2,6 +2,16 @@ import cv2 as cv
 import time
 import numpy as np
 
+map_cam_id = {"SIDE": [1], "TOP": [2,3,4,5]}
+
+def map_id_cam(cam_id):
+    match cam_id:
+        case 1:
+            return "SIDE"
+        case 2|3|4|5:
+            return "TOP"
+        case _:
+            return None
 
 def map_cameras_with_aruco(max_to_check=5):
     """
@@ -43,9 +53,10 @@ def map_cameras_with_aruco(max_to_check=5):
 
             if ids is not None:
                 # Get the first marker ID detected in this camera
-                marker_id = ids[0][0] if ids[0][0] != 3 else 2
+                marker_id = ids[0][0]
+                cam = map_id_cam(marker_id)
                 print(f"     [SUCCESS] ArUco ID '{marker_id}' found on USB index {idx}!")
-                camera_mapping[marker_id] = idx
+                camera_mapping[cam] = idx
             else:
                 print(f"     [FAILED] No ArUco marker detected on index {idx}.")
 
@@ -64,18 +75,18 @@ if __name__ == "__main__":
     print(my_cameras)
 
     # Let's say we are looking for the camera that has Marker ID 1
-    TARGET_MARKER_ID = 2
+    TARGET_CAM = "SIDE"
 
-    if TARGET_MARKER_ID in my_cameras:
-        cam_index = my_cameras[TARGET_MARKER_ID]
-        print(f"\nTarget Camera (Marker {TARGET_MARKER_ID}) is on USB index {cam_index}")
+    if TARGET_CAM in my_cameras:
+        cam_index = my_cameras[TARGET_CAM]
+        print(f"\nTarget Camera (Marker {TARGET_CAM}) is on USB index {cam_index}")
 
         # 2. Open the camera
         cap = cv.VideoCapture(cam_index)
 
         # 3. Load the specific calibration file for this camera!
         # (Assuming you saved it as camera_1_params.yaml)
-        yaml_file = r"C:\Users\mathi\PycharmProjects\SmartFarm\ComputerVision\Calibration\calibration_images"+f"/Camera_{TARGET_MARKER_ID}/params.yaml"
+        yaml_file = r"C:\Users\mathi\PycharmProjects\SmartFarm\ComputerVision\Calibration\calibration_images"+f"/Camera_{TARGET_CAM}/params.yaml"
         print(f"Loading calibration from: {yaml_file}")
 
         cv_file = cv.FileStorage(yaml_file, cv.FILE_STORAGE_READ)
@@ -86,7 +97,7 @@ if __name__ == "__main__":
             print("Camera parameters loaded successfully.")
 
             # --- SCALE CALCULATION ---
-            KNOWN_MARKER_SIZE_MM = 60.0  # Your physical marker size
+            KNOWN_MARKER_SIZE_MM = 30.0  # Your physical marker size
 
             # Setup ArUco detector
             dictionary = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_4X4_50)
@@ -104,21 +115,23 @@ if __name__ == "__main__":
             # Grab the actual frame for measurement
             ret, frame = cap.read()
             if ret:
-                frame = cv.rotate(frame, cv.ROTATE_180)
                 h, w = frame.shape[:2]
 
                 # 1. Undistort the frame before doing any measurements!
                 newcameramtx, roi = cv.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
                 undistorted_frame = cv.undistort(frame, mtx, dist, None, newcameramtx)
 
+                undistorted_frame = cv.rotate(undistorted_frame, cv.ROTATE_180)
                 # 2. Detect the ArUco marker in the undistorted image
                 corners, ids, rejected = detector.detectMarkers(undistorted_frame)
 
+                marker_id = map_cam_id[TARGET_CAM][0]
+
                 # 3. Check if we found markers, and specifically OUR target marker
-                if ids is not None and TARGET_MARKER_ID in ids:
+                if ids is not None and marker_id in ids:
 
                     # Find which index corresponds to our specific target marker
-                    marker_index = np.where(ids == TARGET_MARKER_ID)[0][0]
+                    marker_index = np.where(ids == marker_id)[0][0]
                     marker_corners = corners[marker_index][0]
 
                     # Corners are returned as: [top-left, top-right, bottom-right, bottom-left]
@@ -137,7 +150,7 @@ if __name__ == "__main__":
 
                     # Optional: Draw it and show it to verify it works
                     cv.aruco.drawDetectedMarkers(undistorted_frame, corners, ids)
-                    cv.imshow(f"Camera {TARGET_MARKER_ID} - Scale Check", undistorted_frame)
+                    cv.imshow(f"Camera {TARGET_CAM} - Scale Check", undistorted_frame)
                     cv.waitKey(15000)  # Show for 2 seconds
                     cv.destroyAllWindows()
 
@@ -145,7 +158,7 @@ if __name__ == "__main__":
                     # --> and multiply any pixel length by `mm_per_pixel` to get mm!
 
                 else:
-                    print(f"\nError: Could not see ArUco Marker {TARGET_MARKER_ID} to calculate scale.")
+                    print(f"\nError: Could not see ArUco Marker {TARGET_CAM} to calculate scale.")
 
             else:
                 print("\nError: Could not grab a frame from the camera.")
@@ -155,4 +168,4 @@ if __name__ == "__main__":
 
         cap.release()
     else:
-        print(f"\nWarning: Could not find Camera with Marker ID {TARGET_MARKER_ID}.")
+        print(f"\nWarning: Could not find Camera with Marker ID {TARGET_CAM}.")

@@ -6,3 +6,4 @@ WeatherJanv2026/
 *.pyc
 
 calibration_images/
+calibrated_captures/

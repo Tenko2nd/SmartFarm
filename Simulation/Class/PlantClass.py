@@ -1,4 +1,8 @@
+import math
 import random
+
+from warnings import deprecated
+
 import Simulation.utils.Constants as C
 
 # OPTIMIZATION: the damage buffer gestion can be improved, reduce functions call
@@ -39,14 +43,18 @@ class Plant(object):
         # Biological variable
         self.green_pixels = 0
         self.necrotic_pixels = 0
-        self.GLI = 0
-        self.growth_stage = "E"
+        self.height = 0
+        self.gai = 0
+        self.growth_stage = "GS30"
         self.stage_pct = 0
         self.severity_env = {}
         self.is_dead = False
         self.stress_buffers = {}
         self.damages = {}
         self.death_timestamp = None
+
+        # Calculation variable
+        self.de_prev = 0.0
 
         self.current_time = None
         self.last_observation = {}
@@ -69,7 +77,7 @@ class Plant(object):
         self._update_damages()
 
         # Update soil moisture
-        self._update_soil_moisture(et0=env_conditions["et0"])
+        self._update_soil_moisture(et0=env_conditions["et0"], humidity=env_conditions["Humidity"])
 
         # Calculate hourly progress adjusted by plant health
         days_in_state = C.PLANT_STAGE_TIME[self.growth_stage]
@@ -94,7 +102,7 @@ class Plant(object):
     #  (eg. A plant has critic vpd, 5 hours later it appears visible problems if not fixed)
     # TODO: Change smooth curve for mors realistic curve? research realistic data to see how it react to each variable
 
-    # DEPRECATED: use the damage_buffers with the add_stress method for monitoring health and damage instead
+    @deprecated("use the damage_buffers with the add_stress method for monitoring health and damage instead") # DEPRECATED
     def _calculate_health_score(self, env_conditions):
         """
         The pourcentage of optimal condition respected for the plant to grow perfectly.
@@ -164,8 +172,6 @@ class Plant(object):
 
         # This is the "Perfect" moisture point for the current weather
         dynamic_target = moisture_low + (vpd_ratio * (moisture_high - moisture_low))
-
-        print(f"moisture : {self.moisture:.2f}%, dynamic : {dynamic_target:.2f}%")
 
         score = 0.0
         # 3. SCORING LOGIC
@@ -326,34 +332,85 @@ class Plant(object):
         self.P = max(0, round(self.P - consumption_p, 5))
         self.K = max(0, round(self.K - consumption_k, 5))
 
-    def _update_soil_moisture(self, et0):
+    def _update_soil_moisture(self, et0, humidity):
         """
         Estimates the loss of soil moisture % based on ET0.
+        FAO-56 Dual Crop Coefficient Method for Estimating Evaporation from Soil and Application Extensions. https://doi.org/10.1061/(ASCE)0733-9437(2005)131:1(2)
         :param et0: Reference ET0 in mm/day
         """
         step_hours = C.DATA_UPDATE_MIN / 60.0
-        max_water_mm = C.MAX_WATER_DEPTH_MM * C.POT_DEPTH
+        taw = 1000 * C.SOIL_WATER_CAPACITY * self.height * C.HEIGH_TO_ROOT_RATIO
+        raw = C.P_RAW * taw
 
         # Get Crop Coefficient (Kc) with linear interpolation
         next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
-            if self.growth_stage != "M" else self.growth_stage
-        kc_stage = C.KC_MAPPING.get(self.growth_stage, 0.5)
-        kc_linear = C.KC_MAPPING.get(next_stage, 0.5) - C.KC_MAPPING.get(self.growth_stage, 0.5) * self.stage_pct/100
-        kc = kc_stage + kc_linear
+            if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
+        kcb_stage = C.KC_MAPPING.get(self.growth_stage, 0.5)
+        kcb_linear = C.KC_MAPPING.get(next_stage, 0.5) - C.KC_MAPPING.get(self.growth_stage, 0.5) * self.stage_pct/100
+        u2 = 0 # No wind in a green house
+        # FIXME: They used the mean daily minimum relative humidity for the season (maybe simplification, daily min should do enough)
+        climate_adjustment = (0.04*(u2-2) - 0.004*(humidity-45))*math.pow((self.height/3),0.3)
+        kcb = (kcb_stage + kcb_linear) + climate_adjustment
+        kc_max = max(1.2  + climate_adjustment, kcb + 0.05)
 
-        # Calculate Actual Evapotranspiration (ETc)
-        etc = et0 * kc
+        fc = math.pow((kcb - C.KC_MIN) / (kc_max - C.KC_MIN), 1 + 0.5 * self.height)
+        fc = max(0.0, min(0.99, fc))
 
-        # Convert daily loss to hourly loss for the specific time step
-        etc_step = (etc / 24.0) * step_hours
+        few = min(1 - fc, C.FW)
 
-        # Convert mm loss to percentage points loss
-        # Calculation: (mm_loss / total_mm_capacity) * 100
-        pct_loss = (etc_step / max_water_mm) * 100
+        if self.de_prev <= C.REW:
+            kr = 1.0  # Stage 1: Soil is wet, evaporating at max rate
+        else:
+            # Stage 2: Soil is drying, evaporation is slowing down
+            kr = (C.TEW - self.de_prev) / (C.TEW - C.REW)
+            kr = max(0.0, min(1.0, kr))
 
-        # Apply loss to soil moisture
-        #TODO: add some noise? create a function global
-        self.moisture = round(max(0, self.moisture - pct_loss), 5)
+        ke = min(kr * (kc_max - kcb), few * kc_max)
+
+        depletion_mm = (1 - (self.moisture / 100)) * taw
+        if depletion_mm > raw:
+            ks = (taw - depletion_mm) / (taw - raw)
+        else:
+            ks = 1.0
+        ks = max(0.0, ks)
+
+        # Transpiration (from plants)
+        t_daily_mm = (kcb * ks) * et0
+        # Evaporation (from soil surface)
+        e_daily_mm = ke * et0
+
+        # Scale to step_hours
+        t_step_mm = (t_daily_mm / 24.0) * step_hours
+        e_step_mm = (e_daily_mm / 24.0) * step_hours
+        etc_step_mm = t_step_mm + e_step_mm
+
+        #NOTE: when I want to waterize use this: net_wetting = irrigation_step / fw # remember to update de_prev also
+        # --- RECEPTION DE L'EAU (Pluie ou Irrigation) ---
+        # eau_entree_mm = pluie_mm + irrigation_mm
+        #
+        # # 1. Mise à jour du GROS bucket (Root Zone - TAW)
+        # # On réduit la déplétion du gros bucket (Dr)
+        # dr_prev = (1 - (self.moisture / 100)) * TAW
+        # dr_new = dr_prev - eau_entree_mm + etc_step_mm
+        # dr_new = max(0, dr_new)  # On ne peut pas avoir une déplétion négative
+        # self.moisture = (1 - (dr_new / TAW)) * 100
+        #
+        # # 2. Mise à jour du PETIT bucket (Surface - TEW)
+        # # fw est la fraction mouillée (ex: 1.0 pour la pluie)
+        # # On divise l'eau par fw car elle se concentre sur la zone mouillée (Eq. 12)
+        # self.de_prev = self.de_prev - (eau_entree_mm / fw) + (e_step_mm / few)
+        # self.de_prev = max(0, min(TEW, self.de_prev))
+
+        # Update surface depletion
+        de_loss = (e_step_mm / few) if few > 0 else 0
+        self.de_prev = self.de_prev + de_loss
+        self.de_prev = max(0.0, min(C.TEW, self.de_prev))
+
+        # Total water loss
+        pct_loss = (etc_step_mm / taw) * 100
+
+        # Apply to moisture
+        self.moisture = round(max(0, min(100, self.moisture - pct_loss)), 5)
 
     # TODO: Improve health gestion, make it better
     def _update_pixels(self, light_intensity):
@@ -470,9 +527,6 @@ class Plant(object):
                 self.damages.append(self.severity_env[it])
             elif buf.takes_damages and it not in self.severity_env:
                 self.damages.append(1.0)
-
-        print({it: buf.value for it, buf in self.stress_buffers.items()})
-        print(self.damages)
 
         finished = [name for name, buf in self.stress_buffers.items() if buf.is_empty()]
         for name in finished:

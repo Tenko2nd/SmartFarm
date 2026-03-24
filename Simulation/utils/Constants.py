@@ -49,6 +49,18 @@ GAI = {
     "GS93": 0
 }
 
+# Height of the plant based on the wheat stage
+HEIGHT = {
+    "GS30": 5,
+    "GS31": 9,
+    "GS39": 34,
+    "GS59": 53,
+    "GS61": 69,
+    "GS71": 69,
+    "GS87": 69,
+    "GS93": 69
+}
+
 # ----- CO2 & light-----
 # The optimal atmospheric CO2 concentration for the growth of winter wheat (Triticum aestivum). Journal of Plant Physiology, 184, 89-97. https://doi.org/10.1016/j.jplph.2015.07.003
 TARGET_CO2_RANGE = [890,910] # Wheat CO2 for optimal growth (ppm) EDIT: Realy depends on the light intensity
@@ -72,9 +84,31 @@ ROOM_VOLUME_LITERS = 0.4*0.6*0.4 + (0.4*0.6*0.15)/2
 # Fertilizer Requirements of Irrigated Grain and Oilseed Crops, alberta
 SOIL_MOISTURE_RANGE = [60, 90] # The higher the vpd, the higher the soil moisture to avoid stress
 CRITIC_SOIL_MOISTURE_RANGE = [40, 100]
+
+# based on https://www.fao.org/4/x0490e/x0490e0b.htm Table 12
+KC_MAPPING = {
+    "GS30": 0.15,
+    "GS31": 0.3,
+    "GS39": 1.15,
+    "GS59": 1.15,
+    "GS61": 1.15,
+    "GS71": 0.9,
+    "GS87": 0.3,
+    "GS93": 0.15}
+
+# based on https://www.fao.org/4/x0490e/x0490e0b.htm
+SOIL_KE = 1
+REW = 9.0
+TEW = 22.0
+ZE = 0.1
+KC_MIN = 0.15
+FW = 0.6
+
 # The maximum depth of available water in the pot (in mm/m) at 100% moisture. https://www.fao.org/4/r4082e/r4082e03.htm
 MAX_WATER_DEPTH_MM = 170
-POT_DEPTH = 0.5 # meter
+SOIL_WATER_CAPACITY = 0.15 # https://www.fao.org/4/x0490e/x0490e0c.htm Table 19 (0FC - 0WP)
+HEIGH_TO_ROOT_RATIO = 1.5 # NOTE: This is use for simplicity, it is not exactly true for every variety of wheat
+P_RAW = 0.55 # https://www.fao.org/4/x0490e/x0490e0e.htm Table 22
 
 
 # The Plant-Transpiration Response to Vapor Pressure Deficit (VPD) in Durum Wheat Is Associated With Differential Yield Performance and Specific Expression of Genes Involved in Primary Metabolism and Water Transport. Frontiers in Plant Science, 9, 1994. https://doi.org/10.3389/fpls.2018.01994

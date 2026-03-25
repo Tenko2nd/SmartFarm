@@ -39,11 +39,13 @@ class Plant(object):
         self.N = int(random.gauss(83, 10))
         self.P = int(random.gauss(43, 5))
         self.K = int(random.gauss(133, 15))
-        self.moisture = random.randint(50,100)
+        self.moisture_mm = random.randint(50,100)
+        self.sensor_moisture = random.randint(50,100)
         # Biological variable
         self.green_pixels = 0
         self.necrotic_pixels = 0
         self.height = 0
+        self.root_depth = 0
         self.gai = 0
         self.growth_stage = "GS30"
         self.stage_pct = 0
@@ -70,7 +72,7 @@ class Plant(object):
         step_hours = C.DATA_UPDATE_MIN / 60.0
 
         self.severity_env["vpd"] = 1 - self._optimal_vpd(env_conditions['vpd'])
-        self.severity_env["moisture"] = 1 - self._optimal_soil(self.moisture, env_conditions['vpd'])
+        self.severity_env["moisture"] = 1 - self._optimal_soil(self.sensor_moisture, env_conditions['vpd'])
         self.severity_env["NPK"] = 1 - self._optimal_npk(self.N, self.P, self.K)
         co2, light = env_conditions["CO2"], env_conditions["LightIntensity"]
         self.severity_env["CO2"] = 1 - self._optimal_co2_light_synergy(co2, light)
@@ -155,6 +157,7 @@ class Plant(object):
 
     def _optimal_soil(self, current_moisture, vpd):
         """
+        #FIXME: We use the moisture mm now and the stress from the function update moisture can help!!
         Calculates soil moisture optimality (0-100%) dynamically based on VPD.
 
         Args:
@@ -337,20 +340,26 @@ class Plant(object):
         Estimates the loss of soil moisture % based on ET0.
         FAO-56 Dual Crop Coefficient Method for Estimating Evaporation from Soil and Application Extensions. https://doi.org/10.1061/(ASCE)0733-9437(2005)131:1(2)
         :param et0: Reference ET0 in mm/day
+        NOTE: The result is based on TAW (plant view) of the moisture used for realistic growth, not the sensor (TEW)
         """
         step_hours = C.DATA_UPDATE_MIN / 60.0
-        taw = 1000 * C.SOIL_WATER_CAPACITY * self.height * C.HEIGH_TO_ROOT_RATIO
+        old_taw = 1000 * C.SOIL_WATER_CAPACITY * self.root_depth
+        self.root_depth = self.height * C.HEIGH_TO_ROOT_RATIO
+        taw = 1000 * C.SOIL_WATER_CAPACITY * self.root_depth
         raw = C.P_RAW * taw
+
+        if taw > old_taw:
+            self.moisture_mm += (taw - old_taw) * (self.moisture_mm / old_taw) # Keep the same ratio
 
         # Get Crop Coefficient (Kc) with linear interpolation
         next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
             if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
         kcb_stage = C.KC_MAPPING.get(self.growth_stage, 0.5)
-        kcb_linear = C.KC_MAPPING.get(next_stage, 0.5) - C.KC_MAPPING.get(self.growth_stage, 0.5) * self.stage_pct/100
+        kcb_base = kcb_stage + (C.KC_MAPPING.get(next_stage, 0.5) - kcb_stage) * (self.stage_pct / 100.0)
         u2 = 0 # No wind in a green house
         # FIXME: They used the mean daily minimum relative humidity for the season (maybe simplification, daily min should do enough)
         climate_adjustment = (0.04*(u2-2) - 0.004*(humidity-45))*math.pow((self.height/3),0.3)
-        kcb = (kcb_stage + kcb_linear) + climate_adjustment
+        kcb = kcb_base + climate_adjustment
         kc_max = max(1.2  + climate_adjustment, kcb + 0.05)
 
         fc = math.pow((kcb - C.KC_MIN) / (kc_max - C.KC_MIN), 1 + 0.5 * self.height)
@@ -367,7 +376,7 @@ class Plant(object):
 
         ke = min(kr * (kc_max - kcb), few * kc_max)
 
-        depletion_mm = (1 - (self.moisture / 100)) * taw
+        depletion_mm = taw - self.moisture_mm
         if depletion_mm > raw:
             ks = (taw - depletion_mm) / (taw - raw)
         else:
@@ -385,6 +394,7 @@ class Plant(object):
         etc_step_mm = t_step_mm + e_step_mm
 
         #NOTE: when I want to waterize use this: net_wetting = irrigation_step / fw # remember to update de_prev also
+        # Also need to be change for self.moisture_mm
         # --- RECEPTION DE L'EAU (Pluie ou Irrigation) ---
         # eau_entree_mm = pluie_mm + irrigation_mm
         #
@@ -401,16 +411,22 @@ class Plant(object):
         # self.de_prev = self.de_prev - (eau_entree_mm / fw) + (e_step_mm / few)
         # self.de_prev = max(0, min(TEW, self.de_prev))
 
+        # the roots in the 10cm are also taking water from it. The power 0.6 is because it is denser than lower roots.
+        proportion_roots_in_surface = math.pow(C.ZE / self.root_depth, 0.6) if self.root_depth > 0 else 0
+        proportion_roots_in_surface = min(1.0, proportion_roots_in_surface)
+
+        # Water drained from 'surfacique roots'
+        tei_step_mm = t_step_mm * proportion_roots_in_surface
+
         # Update surface depletion
         de_loss = (e_step_mm / few) if few > 0 else 0
-        self.de_prev = self.de_prev + de_loss
+        self.de_prev = self.de_prev + de_loss + tei_step_mm
         self.de_prev = max(0.0, min(C.TEW, self.de_prev))
 
-        # Total water loss
-        pct_loss = (etc_step_mm / taw) * 100
-
         # Apply to moisture
-        self.moisture = round(max(0, min(100, self.moisture - pct_loss)), 5)
+        self.moisture_mm -= (t_step_mm + e_step_mm)
+        self.moisture_mm = max(0.0, min(taw, self.moisture_mm))
+        self.sensor_moisture = ((C.TEW - self.de_prev) / C.TEW) * 100
 
     # TODO: Improve health gestion, make it better
     def _update_pixels(self, light_intensity):
@@ -486,10 +502,11 @@ class Plant(object):
             "N": self.N,
             "P": self.P,
             "K": self.K,
-            "moisture": self.moisture,
+            "moisture": self.sensor_moisture,
             "green_pixels": self.green_pixels,
             "necrotic_pixels": self.necrotic_pixels,
-            "gli": self.GLI,
+            "gai": self.gai,
+            "height": self.height,
             "growth_stage": self.growth_stage,
             "is_alive": 0 if self.is_dead else 1,
         }

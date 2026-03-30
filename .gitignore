@@ -6,3 +6,5 @@ WeatherJanv2026/
 *.pyc
 
 *.jpg
+/ComputerVision/OUTPUT
+*.ipynb

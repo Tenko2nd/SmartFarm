@@ -1,8 +1,8 @@
 import math
 import random
-import Simulation.utils.Constants as C
+import simulation.utils.constants as C
 
-from Simulation.Class.PlantClass import Plant
+from simulation.Class.plant_class import Plant
 
 
 class Farm(object):
@@ -78,9 +78,8 @@ class Farm(object):
         pressure_atm = self.pressure / 1013.25
         molar_volume = R * temp_k / pressure_atm
 
-        # 2. CALCULATE NET UPTAKE RATE (umol/m2/s)
-        # Equation from NASA study (Fig 7): y = 0.054784x - 9.6297
-        # -9.6297 represents the respiration at 20°C.
+        # 2. CALCULATE STAND-LEVEL UPTAKE POTENTIAL (umol/m2/s)
+        # The NASA equation y = 0.054784x - 9.6297 is for a FULL CANOPY (Stand).
         base_respiration = 9.6297
 
         # Adjust respiration for temperature (Article 2: 75% increase from 16C to 24C)
@@ -90,23 +89,32 @@ class Farm(object):
         adjusted_respiration = base_respiration * temp_factor
 
         gross_photosynthesis = 0.054784 * self.light_intensity
-        net_uptake_rate = gross_photosynthesis - adjusted_respiration
+
+        # 3. AREA & LIGHT INTERCEPTION
+        total_delta_mol = 0
+        for plant in self.plantList:
+            # Beer-Lambert Law: Fraction of light intercepted by the green leaf layers
+            # If GAI is low (0.1), f_ipar is low. If GAI is high (3.0+), f_ipar is near 1.0
+            f_ipar = 1 - math.exp(-C.K_EXTINCTION * plant.gai)
+
+            # Uptake for the plant
+            net_rate = (gross_photosynthesis * f_ipar) - (adjusted_respiration * f_ipar)
+
+            total_seconds = C.DATA_UPDATE_MIN * 60
+            plant_mol = (net_rate * C.PLANT_POT_SIZE_M2 * total_seconds) / 1_000_000
+            total_delta_mol += plant_mol
 
         # 3. ADJUST FOR CO2 CONCENTRATION LIMITATION
         # Article 2 shows rate is stable from 800-2200ppm but drops below 800.
+        co2_efficiency = 1.0
         if self.co2 < 800:
             # Linear scaling factor: at 800ppm = 1.0, at 190ppm (compensation point) = 0.0
-            co2_factor = max(0.0, (self.co2 - 190) / (800 - 190))
-            net_uptake_rate *= co2_factor
+            co2_efficiency  = max(0.0, (self.co2 - 190) / (800 - 190))
         elif self.co2 > 2200:
             # Article 2 notes slight decrease/saturation above 2200
-            net_uptake_rate *= 0.9
+            co2_efficiency *= 0.9
 
-        # 4. CALCULATE TOTAL QUANTITY ABSORBED
-        plant_size_m2 = sum(plant.green_pixels for plant in self.plantList) / C.PX_TO_SQRT_METER
-
-        total_seconds = C.DATA_UPDATE_MIN * 60
-        total_mol_absorbed = (net_uptake_rate * plant_size_m2 * total_seconds) / 1_000_000  # convert umol to mol
+        total_mol_absorbed = total_delta_mol * co2_efficiency  # convert umol to mol
 
         # 5. CONVERT ABSORBED MICROMOLES TO PPM CHANGE IN ROOM
         # ppm = (micromoles_of_gas / total_moles_of_air)

@@ -7,8 +7,8 @@ import pandas as pd
 import numpy as np
 import math
 
-from Simulation.Class.FarmClass import Farm
-import Simulation.utils.Constants as C
+from simulation.Class.farm_class import Farm
+import simulation.utils.constants as C
 
 #TODO: At the end if this script is robust, use it to train the model in reinforcement learning.
 
@@ -20,7 +20,11 @@ import Simulation.utils.Constants as C
 #TODO: Make a file for different farm environment in order to give the model multiple scenarii
 
 #TODO: Based on Plant growth stage, refill with water put ratio NPK
-#TODO: Make sigmoid for a more realistic data in different stages (NPK, Growth, etc) at beginning of stage slow then fast then slow
+#TODO: Make cubic spline interpolation for a more realistic data in different stages (NPK, Growth, etc) at beginning of stage slow then fast then slow
+
+#TODO: Make the simulation not start on 1 january but based on research when is the wheat planted
+#TODO (maybe): verify if the total number of plant can be in the room based on the constant PLANT_POT_DIMENSIONS and ROOM_DIMENSIONS_M
+# (same with height of plant and room height), Do we account for the rood depth and the pot height??
 
 class SimulationManager:
     def __init__(self, weather_csv):

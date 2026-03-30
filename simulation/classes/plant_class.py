@@ -3,32 +3,7 @@ import random
 
 from warnings import deprecated
 
-import Simulation.utils.Constants as C
-
-# OPTIMIZATION: the damage buffer gestion can be improved, reduce functions call
-
-class StressBuffer:
-    def __init__(self, name, recovery_ratio, days_to_effect):
-        self.name = name
-        self.value = 0.0 # 0.0 to 1.0
-        self.ticks_to_effect = days_to_effect * C.TICKS_DAY # At what point does visible damage appears?
-        self.recovery_rate = recovery_ratio/self.ticks_to_effect # How fast it drains when stress is gone
-        self.takes_damages = False
-
-    def add_stress(self, amount):
-        """Adds stress, but caps it so it doesn't become infinite."""
-        self.value = min(1.0, self.value + (amount/self.ticks_to_effect))
-        if not self.takes_damages and self.value > 0.95:
-            self.takes_damages = True
-
-    def recover(self):
-        """Naturally reduces stress over time."""
-        self.value = max(0.0, self.value - self.recovery_rate)
-        if self.takes_damages and self.value < 0.8:
-            self.takes_damages = False
-
-    def is_empty(self):
-        return self.value <= 0
+import simulation.utils.constants as C
 
 class Plant(object):
     def __init__(self, plant_id, coordinate):
@@ -41,19 +16,28 @@ class Plant(object):
         self.K = int(random.gauss(133, 15))
         self.moisture_mm = random.randint(50,100)
         self.sensor_moisture = random.randint(50,100)
-        # Biological variable
-        self.green_pixels = 0
-        self.necrotic_pixels = 0
-        self.height = 0
-        self.root_depth = 0
-        self.gai = 0
-        self.growth_stage = "GS30"
-        self.stage_pct = 0
-        self.severity_env = {}
+
+        # Health
+        self.vitality = 1.0 # (Permanent)
+        self.health = 1.0   # (Reversible)
+        self.senescence = False
         self.is_dead = False
         self.stress_buffers = {}
         self.damages = {}
+        self.penalties = {}
         self.death_timestamp = None
+        self.severity_env = {}
+
+        # Biological variable
+        self.green_area = 0
+        self.necrotic_area = 0.0 # Permanent tissue death (research: Does the plant get rid of it at one point)
+        self.height = 0
+        self.root_depth = 0
+        self.gai = 0
+        self.growth_stage = C.STAGE_SEQUENCE[0]
+        self.next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
+            if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
+        self.stage_pct = 0
 
         # Calculation variable
         self.de_prev = 0.0
@@ -96,8 +80,8 @@ class Plant(object):
                 self.growth_stage = next_stage
                 self.stage_pct = 0
 
-        self._update_pixels(light_intensity=env_conditions["LightIntensity"])
-        self._update_gli()
+        self._update_height()
+        self._update_gai()
         self._has_it_died()
 
     # TODO: Make critic index values have consequences later
@@ -381,7 +365,7 @@ class Plant(object):
             ks = (taw - depletion_mm) / (taw - raw)
         else:
             ks = 1.0
-        ks = max(0.0, ks)
+        ks = max(0.0, ks) #TODO: Use this to apply stress
 
         # Transpiration (from plants)
         t_daily_mm = (kcb * ks) * et0
@@ -428,73 +412,24 @@ class Plant(object):
         self.moisture_mm = max(0.0, min(taw, self.moisture_mm))
         self.sensor_moisture = ((C.TEW - self.de_prev) / C.TEW) * 100
 
-    # TODO: Improve health gestion, make it better
-    def _update_pixels(self, light_intensity):
-
-        #RESEARCH: maybe use the size max/ standard for each stages and correlate w/ prc_stage
-        growth_speed = 0.0001
-        growth_factor = 0
-        recovery_rate = 0.3
-        step_hours = C.DATA_UPDATE_MIN / 60.0
-
-        match self.growth_stage:
-            case "M":
-                growth_factor = self.green_pixels * self.stage_pct / 100
-            case "A":
-                growth_factor = 1.0
-            case "H":
-                growth_factor = self.green_pixels  * growth_speed
-            case "FN":
-                growth_factor = self.green_pixels  * growth_speed * 2
-            case "TS":
-                growth_factor = self.green_pixels  * growth_speed * 5
-            case "FI":
-                growth_factor = self.green_pixels  * growth_speed * 4
-            case "E":
-                growth_factor = self.stage_pct
-            case _:
-                growth_factor = 0.0
-
-        growth_factor = growth_factor * 0.2 if light_intensity <= 15 else growth_factor  # growth slower at night
+    def _update_height(self):
+        next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
+            if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
+        height_stage = C.HEIGHT_MAPPING.get(self.growth_stage, 0.5)
+        self.height = height_stage + (C.HEIGHT_MAPPING.get(next_stage, 0.5) - height_stage) * (self.stage_pct / 100.0)
 
         health_status = 1-min(sum(self.damages),1) # min((1-self.damages)*1.3, 1)  #For generosity
-        # --- HEALTHY GROWTH ---
-        potential_new_px = int(growth_factor * health_status * step_hours)
-        # Limit growth to pot size
-        if (self.green_pixels + self.necrotic_pixels + potential_new_px) < C.PLANT_POT_SIZE_PX:
-            self.green_pixels += potential_new_px
-        else:
-            self.green_pixels = C.PLANT_POT_SIZE_PX - self.necrotic_pixels
+        # TODO: Depending on health status, inflict size penalty no removable (research which variable influence size delay)
 
-        if self.necrotic_pixels > 0:
-            healed = min(self.necrotic_pixels, int(potential_new_px * recovery_rate))
-            self.necrotic_pixels -= int(healed)
+    def _update_gai(self):
+        next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
+            if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
+        gai_stage = C.GAI_MAPPING.get(self.growth_stage, 0.5)
+        self.gai = gai_stage + (C.GAI_MAPPING.get(next_stage, 0.5) - gai_stage) * (self.stage_pct / 100.0)
 
-        # --- STRESS & NECROSIS ---
-        loss_factor = (1-health_status) * 0.003 #RESEARCH
-        damage = self.green_pixels * loss_factor * step_hours
-
-        self.green_pixels = max(0, self.green_pixels - int(damage))
-        self.necrotic_pixels += int(damage)
-
-    def _update_gli(self):
-        total_visible_px = self.green_pixels + self.necrotic_pixels
-
-        if total_visible_px == 0:
-            self.GLI = 0.0
-            return
-
-        greenness_ratio = self.green_pixels / total_visible_px
-        density_ratio = total_visible_px / C.PLANT_POT_SIZE_PX
-
-        # Final GLI = (Quality of tissue) * (Quantity of tissue)
-        raw_gli = greenness_ratio * density_ratio * 0.8
-
-        # Adjust for senescence (Maturity stage 'M' naturally loses GLI)
-        if self.growth_stage == "M":
-            raw_gli = (1.0 - self.stage_pct / 1000 * 4) * 0.8
-
-        self.GLI = round(max(0.0, min(0.8, raw_gli)), 3)
+        health_status = 1 - min(sum(self.damages), 1)  # min((1-self.damages)*1.3, 1)  #For generosity
+        # TODO: Depending on health status, inflict gai penalty (research which variable influence gai, yellowing, ...)
+        # TODO: add recovery rate if penalty and health status good
 
     def record_probe(self):
         """Called only when IsProbed == 1. Updates the memory."""
@@ -503,8 +438,6 @@ class Plant(object):
             "P": self.P,
             "K": self.K,
             "moisture": self.sensor_moisture,
-            "green_pixels": self.green_pixels,
-            "necrotic_pixels": self.necrotic_pixels,
             "gai": self.gai,
             "height": self.height,
             "growth_stage": self.growth_stage,

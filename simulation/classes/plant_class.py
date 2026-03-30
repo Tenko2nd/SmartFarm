@@ -319,6 +319,8 @@ class Plant(object):
         self.P = max(0, round(self.P - consumption_p, 5))
         self.K = max(0, round(self.K - consumption_k, 5))
 
+
+
     def _update_soil_moisture(self, et0, humidity):
         """
         Estimates the loss of soil moisture % based on ET0.
@@ -416,7 +418,9 @@ class Plant(object):
         next_stage = C.STAGE_SEQUENCE[C.STAGE_SEQUENCE.index(self.growth_stage) + 1] \
             if self.growth_stage != C.STAGE_SEQUENCE[-1] else self.growth_stage
         height_stage = C.HEIGHT_MAPPING.get(self.growth_stage, 0.5)
-        self.height = height_stage + (C.HEIGHT_MAPPING.get(next_stage, 0.5) - height_stage) * (self.stage_pct / 100.0)
+        base_height = height_stage + (C.HEIGHT_MAPPING.get(next_stage, 0.5) - height_stage) * (self.stage_pct / 100.0)
+        # Apply the permanent "scarring" from vitality
+        self.height = base_height * self.penalties["height"]
 
         health_status = 1-min(sum(self.damages),1) # min((1-self.damages)*1.3, 1)  #For generosity
         # TODO: Depending on health status, inflict size penalty no removable (research which variable influence size delay)

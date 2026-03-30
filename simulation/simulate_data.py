@@ -7,8 +7,13 @@ import pandas as pd
 import numpy as np
 import math
 
-from simulation.Class.farm_class import Farm
+from simulation.classes.farm_class import Farm
 import simulation.utils.constants as C
+
+#TOREMEMBER: Make safety bound for the AI model (eg. Don't let it waterize above what is known impossible / safe
+#TOREMEMBER: Make the simulator intentionally UNRELIABLE (randomize everything, prevent mathematical loopholes AMAP)
+#TOREMEMBER: Make the physics change a little after each training and each environnment
+#TOREMEMBER: Add delay on every actions as real life is not instantaneous
 
 #TODO: At the end if this script is robust, use it to train the model in reinforcement learning.
 

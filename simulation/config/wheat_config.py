@@ -1,3 +1,4 @@
+from simulation.classes.plant_effect import EffectTrigger, PlantEffect
 from simulation.classes.stress_buffer import StressBuffer
 
 # Useful links:
@@ -133,8 +134,14 @@ stress_buffers = {
         name="Asphyxiation",
         days_to_effect=(7, 10),    # Kills faster than 14 days in most soil types.
         recovery_days=7,           # Slow: needs to regrow root hairs.
+        base_resilience=0.1,
         threshold_visible_effect=0.3, # 30% stress in: starts yellowing.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.2, PlantEffect.GROWTH_STUNTED),
+            EffectTrigger(0.4, PlantEffect.YELLOWING),
+            EffectTrigger(0.9, PlantEffect.MUSH_TEXTURE)  # Root rot / Anaerobic collapse
+        ]
     ),
 
     # DROUGHT
@@ -144,8 +151,15 @@ stress_buffers = {
         name="Drought",
         days_to_effect=(14, 24),   # Depending on humidity/temp.
         recovery_days=4,           # Fast: Turgor pressure restores quickly if re-watered.
+        base_resilience=0.2,
         threshold_visible_effect=0.1, # 10% stress in: leaves roll/turn blue-gray.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.1, PlantEffect.BLUE_GRAY_LEAVES),
+            EffectTrigger(0.3, PlantEffect.WILTING),
+            EffectTrigger(0.6, PlantEffect.GROWTH_STUNTED),
+            EffectTrigger(0.8, PlantEffect.BROWNING)     # Permanent leaf death
+        ]
     ),
 
     # SALINITY
@@ -155,8 +169,14 @@ stress_buffers = {
         name="Salinity",
         days_to_effect=(25, 35),   # Takes a long time for salt to reach lethal levels in leaves.
         recovery_days=15,          # Very slow: plant must physically export ions or grow new tissue.
+        base_resilience=0.05,       # Salt is very aggressive, wheat is not resilient
         threshold_visible_effect=0.05, # Visible almost immediately as stunted growth.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.05, PlantEffect.GROWTH_STUNTED), # Immediate osmotic impact
+            EffectTrigger(0.4, PlantEffect.TIP_BURN),       # Salt accumulation in tips
+            EffectTrigger(0.8, PlantEffect.BROWNING)
+        ]
     ),
 
     # HEAT
@@ -166,8 +186,14 @@ stress_buffers = {
         name="Heat",
         days_to_effect=(5, 8),     # 7-10 was too generous; 5 days of 40°C kills wheat.
         recovery_days=3,           # Fast metabolic reset if temp drops.
+        base_resilience=0.15,
         threshold_visible_effect=0.5, # Plant looks okay until tips suddenly turn white/brown.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.2, PlantEffect.WILTING),        # Temporary turgor loss
+            EffectTrigger(0.5, PlantEffect.GROWTH_STUNTED), # Metabolic shutdown
+            EffectTrigger(0.8, PlantEffect.TIP_BURN)        # "Scorching"
+        ]
     ),
 
     # FROST
@@ -177,8 +203,13 @@ stress_buffers = {
         name="Frost",
         days_to_effect=(1, 2),     # One bad night can kill the crown.
         recovery_days=14,          # Massive recovery time: must regrow entire tillers from the base.
+        base_resilience=0.02,       # Almost no "safe zone" for freezing
         threshold_visible_effect=0.3, # Visible within 24h as "water-soaked" leaves.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.1, PlantEffect.MUSH_TEXTURE),   # Water-soaked tissue
+            EffectTrigger(0.6, PlantEffect.BROWNING)        # Necrosis
+        ]
     ),
 
     # ETIOLATION (Low Light)
@@ -187,8 +218,14 @@ stress_buffers = {
         name="Etiolation",
         days_to_effect=(15, 25),
         recovery_days=10,          # Stem weakness is a "permanent" scar that takes time to reinforce.
+        base_resilience=0.10,
         threshold_visible_effect=0.2,
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.1, PlantEffect.SPINDLY_GROWTH),
+            EffectTrigger(0.4, PlantEffect.PALE_LEAVES),
+            EffectTrigger(0.7, PlantEffect.GROWTH_STUNTED)  # Carbon starvation
+        ]
     ),
 
     # NITROGEN DEFICIENCY
@@ -197,8 +234,14 @@ stress_buffers = {
         name="N_Deficiency",
         days_to_effect=(35, 50),   # Hard to kill wheat with just low N; it just stays tiny.
         recovery_days=7,           # Green-up happens in a week once N is applied.
+        base_resilience=0.25,
         threshold_visible_effect=0.2,
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.15, PlantEffect.GROWTH_STUNTED),
+            EffectTrigger(0.3, PlantEffect.YELLOWING),
+            EffectTrigger(0.6, PlantEffect.PALE_LEAVES)
+        ]
     ),
 
     # PHOSPHORUS DEFICIENCY
@@ -207,8 +250,13 @@ stress_buffers = {
         name="P_Deficiency",
         days_to_effect=(50, 70),
         recovery_days=14,          # P moves slowly in the plant; recovery is sluggish.
+        base_resilience=0.25,
         threshold_visible_effect=0.3, # Purple stems appear late.
-        is_fatal=False             # Usually stunts rather than kills.
+        is_fatal=False,             # Usually stunts rather than kills.
+        effects=[
+            EffectTrigger(0.2, PlantEffect.GROWTH_STUNTED),
+            EffectTrigger(0.4, PlantEffect.PURPLING)        # Anthocyanin buildup
+        ]
     ),
 
     # POTASSIUM DEFICIENCY
@@ -217,7 +265,13 @@ stress_buffers = {
         name="K_Deficiency",
         days_to_effect=(25, 35),
         recovery_days=7,
+        base_resilience=0.25,
         threshold_visible_effect=0.25, # Leaf margin "burn" is the tell.
-        is_fatal=True
+        is_fatal=True,
+        effects=[
+            EffectTrigger(0.2, PlantEffect.TIP_BURN),       # Marginal scorching
+            EffectTrigger(0.5, PlantEffect.GROWTH_STUNTED),
+            EffectTrigger(0.7, PlantEffect.BROWNING)
+        ]
     ),
 }

@@ -1,10 +1,26 @@
 import cv2
 import time
+from datetime import datetime, timedelta
 import os
 from config_cv import INTERVAL_SEC, WARMUP_SEC, SAVE_DIR, OUTPUT_SIZE
 from camera_mapping import map_cameras_with_aruco, load_calibration_params, undistort_frame
 from homography import get_homography_matrix
 
+
+def get_seconds_until_next_run():
+    now = datetime.now()
+
+    # 1. Find the "base" even hour (e.g., if 13:00, base is 12:00. If 14:00, base is 14:00)
+    even_hour = (now.hour // 2) * 2
+
+    # 2. Create the target for today at [even_hour]:01:00
+    target = now.replace(hour=even_hour, minute=1, second=0, microsecond=0)
+
+    # 3. If the target is already in the past, jump exactly 2 hours forward
+    if target <= now:
+        target += timedelta(hours=2)
+
+    return (target - now).total_seconds(), target.strftime("%H:%M:%S")
 
 def start_capture_loop(initial_mapping):
     if not os.path.exists(SAVE_DIR):
@@ -112,12 +128,12 @@ def start_capture_loop(initial_mapping):
                         print("  [ERROR] TOP Cam: No known homography matrix available to fallback on yet.")
 
             # --- END TIMER AND CALCULATE SLEEP ---
-            elapsed_time = int(time.time() - cycle_start_time)
-            # Subtract elapsed time from the intended interval. max(0, x) prevents negative sleep times.
-            sleep_time = max(0, INTERVAL_SEC - elapsed_time)
+            sleep_time, target_time_str = get_seconds_until_next_run()
 
-            print(f"\nCycle completed in {elapsed_time:.2f} seconds.")
-            print(f"Waiting {sleep_time:.2f} seconds until next scheduled cycle...")
+            print(f"\nCycle completed.")
+            print(f"Next scheduled run: {target_time_str}")
+            print(f"Sleeping for {int(sleep_time // 60)}m {int(sleep_time % 60)}s...")
+
             time.sleep(sleep_time)
 
     except KeyboardInterrupt:

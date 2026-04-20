@@ -5,7 +5,7 @@ import numpy as np
 # --- 1. CHOOSE YOUR IMAGE ---
 BASE_PATH = '../calibrated_captures'
 # This automatically finds the first "SIDE" image in the first folder
-IMAGE_PATH = r"../calibrated_captures/20260321-104952/SIDE_20260321-104952_undistorted.jpg"
+IMAGE_PATH = r"../calibrated_captures/20260330-080100/SIDE_20260330-080100_undistorted.jpg"
 
 if not os.path.exists(IMAGE_PATH):
     print(f"Error: Could not find image at {IMAGE_PATH}")

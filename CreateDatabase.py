@@ -2,15 +2,18 @@ import csv
 import os
 import socket
 import time
+from datetime import datetime
 
 # SERVER CONSTANT
 SERVER_ADDRESS = ('udpserver.bu.ac.th', 5005)
 BUFFER_SIZE = 1024
 
 # DATABASE CONSTANT
-CSV_FILENAME = "sensor_data.csv"
 COLUMNS = ['Timestamp', 'Temperature', 'Humidity', 'Moisture', 'Light', 'Gas']
-INTERVAL = 10
+INTERVAL = 4 * 60
+
+timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+csv_filename = f"sensor_data_{timestamp}.csv"
 
 def send_command(command, id, data=None):
     response = None
@@ -57,8 +60,8 @@ def parse_data(raw_string):
 
 
 def save_row(data):
-    file_exists = os.path.isfile(CSV_FILENAME)
-    with open(CSV_FILENAME, mode='a', newline='') as f:
+    file_exists = os.path.isfile(csv_filename)
+    with open(csv_filename, mode='a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=COLUMNS)
         if not file_exists:
             writer.writeheader()
@@ -93,4 +96,4 @@ def main(interval_seconds=10):
 
 
 if __name__ == "__main__":
-    main(interval_seconds=10)
+    main(interval_seconds=INTERVAL)

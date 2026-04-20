@@ -5,7 +5,9 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
-from ultralytics import YOLO
+import plotly.graph_objects as go
+import os
+# from ultralytics import YOLO
 
 
 # ==========================================
@@ -18,8 +20,8 @@ class Config:
 
     # === HEIGHT CALCULATION ===
     # HSV Thresholds
-    LOWER_GREEN = np.array([36, 57, 0])
-    UPPER_GREEN = np.array([60, 255, 140])
+    LOWER_GREEN = np.array([36, 40, 0])
+    UPPER_GREEN = np.array([60, 255, 167])
 
     # Filtering
     MIN_PLANT_AREA = 100
@@ -27,7 +29,7 @@ class Config:
     MIN_TOTAL_CLUSTER_AREA = 500  # Minimum sum of all pixels in the cluster
     MORPH_KERNEL_SIZE = (3,3)
     MAX_GROWTH_STEP_CM = 5.0      # Max allowed height increase between frames
-    MIN_BRIGHTNESS = 20 # for night images ignore
+    MIN_BRIGHTNESS = 40 # for night images ignore
 
     # YOLO Settings
     MODEL_NAME = 'yolov8n-seg.pt'
@@ -38,11 +40,11 @@ class Config:
     K_EXTINCTION = 0.6  # Beer-Lambert constant
     ALPHA_GAI = 0.5    # Empirical height/volume coefficient
     MIN_BRIGHTNESS_GAI = 3
-    MAX_GROWTH_CC_PCT = 0.05
+    MAX_GROWTH_CC_PCT = 0.04
     GAI_MARKER_MARGIN = 45
 
     # Visualization
-    DISPLAY_DELAY =500
+    DISPLAY_DELAY =200
     SAVE_GRAPH_NAME = r'OUTPUT\plant_growth_curve.png'
 
 
@@ -204,7 +206,7 @@ class PlantAnalyzer:
             detected_h = h / self.ppcm
 
             # If the plant "grew" too fast, it's probably noise.
-            if self.last_height > 0 and (detected_h - self.last_height) > Config.MAX_GROWTH_STEP_CM:
+            if self.last_height > 0 and abs(detected_h - self.last_height) > Config.MAX_GROWTH_STEP_CM:
                 new_h = self.last_height  # Ignore the jump
             else:
                 new_h = detected_h
@@ -254,7 +256,7 @@ class PlantAnalyzer:
         # 3. Canopy Cover (CC)
         cc = np.count_nonzero(mask) / mask.size
 
-        if self.last_cc > 0 and (cc - self.last_cc) > Config.MAX_GROWTH_CC_PCT:
+        if self.last_cc > 0 and abs(cc - self.last_cc) > Config.MAX_GROWTH_CC_PCT:
             cc = self.last_cc  # Ignore the jump
         else:
             self.last_cc = cc
@@ -348,4 +350,8 @@ if __name__ == "__main__":
 
     plt.title("Combined Plant Growth Analysis")
     plt.show()
+
+    directory = os.path.dirname(Config.SAVE_GRAPH_NAME)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     fig.savefig(Config.SAVE_GRAPH_NAME, bbox_inches='tight', dpi=300)

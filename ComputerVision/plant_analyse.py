@@ -1,14 +1,18 @@
 from warnings import deprecated
+from scipy.stats import gaussian_kde
 
 import cv2
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+import time
 import plotly.graph_objects as go
 import os
 # from ultralytics import YOLO
 
+import matplotlib
+matplotlib.use('Agg')
 
 # ==========================================
 # CONFIGURATION
@@ -104,13 +108,14 @@ class PlantAnalyzer:
         hsv_full = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         avg_brightness = np.mean(hsv_full[:,:,2])
         if avg_brightness < Config.MIN_BRIGHTNESS:
-            return None, 0 # Too dark to see anything
+            return None, 0, None, None # Too dark to see anything
 
         # 2. ROI and Masking
         limit = self.x_boundary if self.x_boundary else int(w_img * 0.7)
         roi = frame[:, 0:limit]
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv_roi, Config.LOWER_GREEN, Config.UPPER_GREEN)
+        mask_first = mask.copy()
 
         kernel = np.ones(Config.MORPH_KERNEL_SIZE, np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_ERODE, kernel)
@@ -130,7 +135,7 @@ class PlantAnalyzer:
                     centers_x.append(x + w//2)
 
         if not valid_stalks:
-            return None, limit
+            return None, limit, mask_first, mask
 
         # 4. Clustering (Median X)
         median_x = np.median(centers_x)
@@ -140,7 +145,7 @@ class PlantAnalyzer:
         # 5. DENSITY CHECK (Noise Filter)
         total_cluster_area = sum([s['area'] for s in cluster_parts])
         if total_cluster_area < Config.MIN_TOTAL_CLUSTER_AREA:
-            return None, limit # Not enough "green mass" to be a plant
+            return None, limit, mask_first, mask # Not enough "green mass" to be a plant
 
         # 6. Group Bounding Box
         min_x = min([s['bbox'][0] for s in cluster_parts])
@@ -148,7 +153,7 @@ class PlantAnalyzer:
         max_x = max([s['bbox'][0] + s['bbox'][2] for s in cluster_parts])
         max_y = max([s['bbox'][1] + s['bbox'][3] for s in cluster_parts])
 
-        return (min_x, min_y, max_x - min_x, max_y - min_y), limit
+        return (min_x, min_y, max_x - min_x, max_y - min_y), limit, mask_first, mask
 
     @deprecated("Use _get_plant_bbox_hsv instead")
     def _get_plant_bbox_ai(self, frame):
@@ -197,7 +202,7 @@ class PlantAnalyzer:
             cv2.aruco.drawDetectedMarkers(display_frame, corners, ids, (255, 0, 0))
 
         # Step 2: Plant Detection
-        bbox, x_limit = self._get_plant_bbox_hsv(frame)
+        bbox, x_limit, mask_first, mask = self._get_plant_bbox_hsv(frame)
 
         new_h = self.last_height  # Default to last height
 
@@ -219,10 +224,62 @@ class PlantAnalyzer:
         cv2.putText(display_frame, f"H: {new_h:.2f}cm", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
-        return display_frame, new_h
+        return display_frame, new_h, mask_first, mask
+
+    def _save_diagnostic_histograms(self, r, g, b, exg, threshold_val):
+        """Saves 4 separate PNG files, including the Otsu cut line on ExG."""
+        os.makedirs('OUTPUT', exist_ok=True)
+
+        # Data mapping: (Data, Title, Color, Filename, Bins, ShowThreshold)
+        plot_configs = [
+            (r[r > 0], "Red Channel Distribution", "red", "hist_frame45_red.png", 256, False),
+            (g[g > 0], "Green Channel Distribution", "green", "hist_frame45_green.png", 256, False),
+            (b[b > 0], "Blue Channel Distribution", "blue", "hist_frame45_blue.png", 256, False),
+            (exg, "ExG Distribution", "purple", "hist_frame45_exg_threshold.png", 100, True),
+            (exg, "ExG Distribution", "purple", "hist_frame45_exg.png", 100, False)
+        ]
+
+        for data, title, color, filename, bins, show_thresh in plot_configs:
+            plt.figure(figsize=(10, 6))
+            plt.hist(data.flatten(), bins=bins, color=color, alpha=0.6, edgecolor='black', linewidth=0.2, density=True)
+
+            data_flat = data.flatten()
+            try:
+                # If there are too many pixels, we subsample to speed up calculation
+                if len(data_flat) > 10000:
+                    sample_data = np.random.choice(data_flat, 10000, replace=False)
+                else:
+                    sample_data = data_flat
+
+                kde = gaussian_kde(sample_data)
+                x_range = np.linspace(data_flat.min(), data_flat.max(), 500)
+                plt.plot(x_range, kde(x_range), color='black', linewidth=2, label='Smooth Density Curve')
+            except Exception as e:
+                print(f"Could not calculate KDE for {title}: {e}")
+
+            # Add the Otsu Threshold Line
+            if show_thresh:
+                plt.axvline(threshold_val, color='black', linestyle='--', linewidth=2,
+                            label=f'Otsu Threshold: {threshold_val:.2f}')
+                # Shade the areas to show what is "Plant" vs "Background"
+                plt.axvspan(threshold_val, np.max(data), color='green', alpha=0.1)
+                plt.text(threshold_val, plt.ylim()[1]*0.8, '  PLANT (Detected)', color='green', fontweight='bold')
+                plt.text(threshold_val, plt.ylim()[1]*0.8, 'SOIL  ', color='brown',
+                         fontweight='bold', horizontalalignment='right')
+
+            plt.legend()
+            plt.title(title)
+            plt.xlabel("Value")
+            plt.ylabel("Frequency")
+            plt.grid(axis='y', alpha=0.3)
+
+            save_path = os.path.join('OUTPUT', filename)
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {save_path}")
 
     # === TOP VIEW METHODS (GAI) ===
-    def calculate_gai(self, top_frame, current_height):
+    def calculate_gai(self, top_frame, current_height, frame_idx=None):
         """Implements your GAI logic using ExG and Otsu."""
         if top_frame is None:
             return self.last_gai, self.last_cc, None
@@ -232,10 +289,10 @@ class PlantAnalyzer:
         m = Config.GAI_MARKER_MARGIN
         h, w = clean_top.shape[:2]
 
-        clean_top[0:m, 0:m] = 0  # Top-Left
-        clean_top[0:m, w - m:w] = 0  # Top-Right
-        clean_top[h - m:h, 0:m] = 0  # Bottom-Left
-        clean_top[h - m:h, w - m:w] = 0  # Bottom-Right
+        # clean_top[0:m, 0:m] = 0  # Top-Left
+        # clean_top[0:m, w - m:w] = 0  # Top-Right
+        # clean_top[h - m:h, 0:m] = 0  # Bottom-Left
+        # clean_top[h - m:h, w - m:w] = 0  # Bottom-Right
 
         hsv_top = cv2.cvtColor(clean_top, cv2.COLOR_BGR2HSV)
         avg_v = np.mean(hsv_top[:, :, 2])
@@ -248,11 +305,16 @@ class PlantAnalyzer:
         # 1. Excess Green Index (ExG)
         b, g, r = cv2.split(clean_top.astype(float))
         exg = 2 * g - r - b
+        exg_min, exg_max = np.min(exg), np.max(exg)
 
         # 2. Otsu Thresholding
         exg_norm = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         otsu_threshold, mask = cv2.threshold(exg_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+        raw_threshold = (otsu_threshold / 255.0) * (exg_max - exg_min) + exg_min
+
+        if frame_idx == 141:
+            self._save_diagnostic_histograms(r, g, b, exg, raw_threshold)
         # 3. Canopy Cover (CC)
         cc = np.count_nonzero(mask) / mask.size
 
@@ -275,31 +337,102 @@ class PlantAnalyzer:
         return round(gai_final, 2), cc, mask
 
 
+class VideoManager:
+    def __init__(self, side_size, top_size, fps=10):
+        os.makedirs('OUTPUT/videos', exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+
+        self.writer_side = cv2.VideoWriter('OUTPUT/videos/height_growth.mp4', fourcc, fps, side_size)
+        self.writer_top = cv2.VideoWriter('OUTPUT/videos/canopy_coverage.mp4', fourcc, fps, top_size)
+
+        self.graph_size = (720, 1080)
+        self.writer_graph = cv2.VideoWriter('OUTPUT/videos/growth_graph.mp4', fourcc, fps, self.graph_size)
+
+    def write_frames(self, side_img, top_overlay, graph_img):
+        self.writer_side.write(side_img)
+        self.writer_top.write(top_overlay)
+        self.writer_graph.write(graph_img)
+
+    def release(self):
+        self.writer_side.release()
+        self.writer_top.release()
+        self.writer_graph.release()
+
+
+def create_plot_frame(data, current_idx, size_px):
+    """Generates a BGR image of the graph (Height and CC only)."""
+    w, h = size_px
+    dpi = 100
+    fig, ax1 = plt.subplots(figsize=(w / dpi, h / dpi), dpi=dpi)
+
+    times = data['time'][:current_idx + 1]
+    heights = data['height'][:current_idx + 1]
+    ccs = data['cc'][:current_idx + 1]
+
+    # Two Axes: Height (Left) and CC (Right)
+    ax2 = ax1.twinx()
+
+    p1, = ax1.plot(times, heights, 'g-', linewidth=2, label='Height (cm)')
+    p2, = ax2.plot(times, ccs, 'r-', linewidth=2, label='Canopy Cover')
+
+    ax1.set_xlabel('Time')
+    ax1.set_ylabel('Height (cm)', color='g')
+    ax2.set_ylabel('Canopy Cover (%)', color='r')
+
+    ax1.tick_params(axis='y', labelcolor='g')
+    ax2.tick_params(axis='y', labelcolor='r')
+
+    plt.title("Plant Growth: Height & Canopy Coverage")
+    lines = [p1, p2]
+    ax1.legend(lines, [l.get_label() for l in lines], loc='upper left')
+
+    fig.tight_layout()
+
+    # Convert to OpenCV image
+    fig.canvas.draw()
+    rgba_buffer = fig.canvas.buffer_rgba()
+    img = np.array(rgba_buffer)
+    img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+
+    plt.close(fig)
+    return cv2.resize(img, size_px)
+
+
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
     analyzer = PlantAnalyzer()
-
     results = {'time': [], 'height': [], 'gai': [], 'cc': []}
+    video_manager = None
 
-    # Setup Data Source
     folders = sorted([f for f in os.listdir(Config.BASE_PATH) if os.path.isdir(os.path.join(Config.BASE_PATH, f))])
 
-    for folder in folders:
+    for idx, folder in enumerate(folders):
         img_path = os.path.join(Config.BASE_PATH, folder)
         side_img_name = next((f for f in os.listdir(img_path) if "SIDE" in f and f.endswith(".jpg")), None)
-        top_img_name  = next((f for f in os.listdir(img_path) if "TOP" in f and f.endswith("homography.jpg")), None)
+        top_img_name = next((f for f in os.listdir(img_path) if "TOP" in f and f.endswith("homography.jpg")), None)
 
         if not side_img_name or not top_img_name: continue
+
         side_img = cv2.imread(os.path.join(img_path, side_img_name))
         top_img = cv2.imread(os.path.join(img_path, top_img_name))
 
-        # Process
-        annotated_img, h_cm = analyzer.process_frame_side(side_img)
-        gai_val, cc_val, top_mask = analyzer.calculate_gai(top_img, h_cm)
+        # 1. Process Data
+        annotated_side, h_cm, mask_first, mask = analyzer.process_frame_side(side_img)
+        gai_val, cc_val, top_mask = analyzer.calculate_gai(top_img, h_cm, frame_idx=idx)
 
-        # Store Data
+        # 2. Create Top View Overlay (Contours on original image)
+        top_overlay = top_img.copy()
+        if top_mask is not None:
+            contours, _ = cv2.findContours(top_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            # Draw contours in Bright Green with thickness 2
+            cv2.drawContours(top_overlay, contours, -1, (0, 255, 0), 2)
+            # Add text label
+            cv2.putText(top_overlay, f"CC: {cc_val * 100:.1f}%", (100, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+
+        # 3. Store Data
         time_str = f"{folder[0:4]}-{folder[4:6]}-{folder[6:8]} {folder[9:11]}:00"
         dt_obj = datetime.strptime(time_str, '%Y-%m-%d %H:%M')
         results['time'].append(dt_obj)
@@ -307,51 +440,57 @@ if __name__ == "__main__":
         results['gai'].append(gai_val)
         results['cc'].append(cc_val)
 
-        # Show
-        cv2.imshow("Analysis", annotated_img)
-        cv2.imshow("TOP Mask (Vegetation)", top_mask)
-        if cv2.waitKey(Config.DISPLAY_DELAY) & 0xFF == ord('q'):
-            break
+        # 4. Handle Video writing
+        if video_manager is None:
+            side_h, side_w = annotated_side.shape[:2]
+            top_h, top_w = top_overlay.shape[:2]
+            video_manager = VideoManager((side_w, side_h), (top_w, top_h), fps=7)
 
+        graph_frame = create_plot_frame(results, len(results['time']) - 1, video_manager.graph_size)
+        video_manager.write_frames(annotated_side, top_overlay, graph_frame)
+
+        # Visual Feedback
+        cv2.imshow("Live Analysis (Side)", annotated_side)
+        cv2.imshow("Live Canopy (Contours)", top_overlay)
+        key = cv2.waitKey(1) & 0xFF
+
+        # Press 'q' to quit
+        if key == ord('q'):
+            break
+        elif key == ord('s'):
+            # Generate a unique filename using a timestamp
+            timestamp = int(time.time())
+
+            # 1. Save the annotated height frame
+            cv2.imwrite(f"height_frame_{timestamp}.png", top_overlay)
+
+            # 2. Save the mask (Replace 'mask' with your actual mask variable name)
+            # If your mask is from the side analysis, use that specific variable
+            cv2.imwrite(f"height_mask_{timestamp}.png", top_mask)
+            cv2.imwrite(f"height_initial_{timestamp}.png", top_img)
+
+            print(f"Screenshots saved at {timestamp}")
+
+    if video_manager:
+        video_manager.release()
     cv2.destroyAllWindows()
 
-    # Final Plotting
-    fig, ax1 = plt.subplots(figsize=(10, 5))
-
-    # Create the twin axes
+    # --- FINAL SUMMARY GRAPH (Without GAI) ---
+    fig, ax1 = plt.subplots(figsize=(12, 6))
     ax2 = ax1.twinx()
-    ax3 = ax1.twinx()
 
-    # This moves the third y-axis to the right so it doesn't overlap ax2
-    ax3.spines.right.set_position(("axes", 1.15))
-
-    # Plot the data
     p1, = ax1.plot(results['time'], results['height'], 'g-', label='Height (cm)')
-    p2, = ax2.plot(results['time'], results['gai'], 'b-', label='GAI')
-    p3, = ax3.plot(results['time'], results['cc'], 'r-', label='CC')
+    p2, = ax2.plot(results['time'], results['cc'], 'r-', label='Canopy Cover')
 
-    # Set labels and colors
     ax1.set_xlabel('Time')
-    ax1.set_ylabel('Height', color='g')
-    ax2.set_ylabel('GAI', color='b')
-    ax3.set_ylabel('CC', color='r')
-
-    # Match tick colors to the line colors for clarity
+    ax1.set_ylabel('Height (cm)', color='g')
+    ax2.set_ylabel('Canopy Cover', color='r')
     ax1.tick_params(axis='y', labelcolor='g')
-    ax2.tick_params(axis='y', labelcolor='b')
-    ax3.tick_params(axis='y', labelcolor='r')
+    ax2.tick_params(axis='y', labelcolor='r')
 
-    # Adjust the right margin to make room for the 3rd axis
-    fig.subplots_adjust(right=0.8)
+    plt.title("Final Growth Report")
+    ax1.legend([p1, p2], [l.get_label() for l in [p1, p2]], loc='upper left')
 
-    # This puts labels in one legend box
-    lines = [p1, p2, p3]
-    ax1.legend(lines, [l.get_label() for l in lines], loc='upper left')
-
-    plt.title("Combined Plant Growth Analysis")
-    plt.show()
-
-    directory = os.path.dirname(Config.SAVE_GRAPH_NAME)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    fig.savefig(Config.SAVE_GRAPH_NAME, bbox_inches='tight', dpi=300)
+    # Save final graph
+    os.makedirs(os.path.dirname(Config.SAVE_GRAPH_NAME), exist_ok=True)
+    plt.savefig(Config.SAVE_GRAPH_NAME, dpi=300)
